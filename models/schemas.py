@@ -59,7 +59,7 @@ class CharacterPatch(BaseModel):
     weapon: Optional[str] = None
     vfx_vibes: Optional[str] = None
     physical_description: Optional[str] = None
-    visual_importance: Optional[int] = None
+    visual_importance: Optional[int] = Field(default=None, ge=1, le=10)
     is_active: Optional[bool] = None
     aliases: Optional[list[str]] = None
 

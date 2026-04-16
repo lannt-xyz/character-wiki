@@ -144,6 +144,7 @@ class SQLiteDB:
             ("faction", "TEXT"),
             ("gender", "TEXT"),
             ("personality", "TEXT"),
+            ("remaster_version", "INTEGER DEFAULT 1"),
         ]:
             if col_name not in existing:
                 self._conn.execute(
@@ -522,6 +523,7 @@ class SQLiteDB:
         gender: Optional[str] = None,
         aliases: Optional[list[str]] = None,
         personality: Optional[str] = None,
+        remaster_version: Optional[int] = None,
     ) -> None:
         """Overwrite enriched identity fields added by remaster. Only touches non-None args."""
         sets = []
@@ -541,6 +543,9 @@ class SQLiteDB:
         if aliases is not None:
             sets.append("aliases_json=?")
             params.append(json.dumps(aliases, ensure_ascii=False))
+        if remaster_version is not None:
+            sets.append("remaster_version=?")
+            params.append(remaster_version)
         if not sets:
             return
         sets.append("updated_at=?")
@@ -721,6 +726,13 @@ class SQLiteDB:
             (artifact_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    def get_v1_weapon_strings(self) -> list[str]:
+        """Return all non-empty weapon strings from v1 wiki_snapshots."""
+        rows = self._conn.execute(
+            "SELECT weapon FROM wiki_snapshots WHERE weapon IS NOT NULL AND weapon != '' AND extraction_version=1"
+        ).fetchall()
+        return [row[0] for row in rows]
 
 
 # ---------------------------------------------------------------------------

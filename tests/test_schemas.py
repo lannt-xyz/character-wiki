@@ -54,6 +54,12 @@ class TestCharacterPatch:
         assert patch.level == "Trúc Cơ"
         assert patch.weapon is None
 
+    def test_visual_importance_bounds(self):
+        with pytest.raises(ValidationError):
+            CharacterPatch(character_id="hero_001", visual_importance=0)
+        with pytest.raises(ValidationError):
+            CharacterPatch(character_id="hero_001", visual_importance=11)
+
 
 class TestExtractionResult:
     def test_empty(self):

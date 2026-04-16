@@ -80,6 +80,13 @@ class TestApplyPatch:
         assert merged["level"] == "Trúc Cơ"
         assert merged["outfit"] is None
 
+    def test_visual_importance_null_in_base_falls_back(self):
+        base = {"level": None, "outfit": None, "weapon": None, "vfx_vibes": None,
+                "physical_description": None, "visual_importance": None, "is_active": 1}
+        patch = CharacterPatch(character_id="hero_001")
+        merged = _apply_patch(base, patch)
+        assert merged["visual_importance"] == 5
+
 
 class TestCountChanges:
     def test_no_changes(self):
@@ -134,6 +141,40 @@ class TestMergeExtractionResult:
         snaps = db.get_all_snapshots("hero_001")
         assert len(snaps) == 1
         assert snaps[0]["level"] == "Luyện Khí 1"
+
+    def test_new_character_null_visual_importance_uses_default(self, db):
+        result = ExtractionResult(
+            batch_chapter_start=1,
+            batch_chapter_end=5,
+            new_characters=[{
+                "character": {
+                    "character_id": "hero_001",
+                    "name": "Lâm Phong",
+                    "name_normalized": "lâm phong",
+                    "aliases": [],
+                    "traits": ["Kiên trì"],
+                    "relations": [],
+                    "visual_anchor": None,
+                },
+                "snapshot": {
+                    "chapter_start": 1,
+                    "is_active": True,
+                    "level": "Luyện Khí 1",
+                    "outfit": "Vải thô",
+                    "weapon": "Không",
+                    "vfx_vibes": "Trắng mờ",
+                    "physical_description": None,
+                    "visual_importance": None,
+                },
+            }],
+        )
+        n_new, n_updated, n_skipped = merge_extraction_result(result, db)
+        assert n_new == 1
+        assert n_updated == 0
+        assert n_skipped == 0
+        snaps = db.get_all_snapshots("hero_001")
+        assert len(snaps) == 1
+        assert snaps[0]["visual_importance"] == 5
 
     def test_updated_character_appends_snapshot(self, db):
         _add_char(db)

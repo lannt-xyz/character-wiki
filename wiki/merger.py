@@ -111,7 +111,7 @@ def merge_extraction_result(
             weapon=snap_data.get("weapon"),
             vfx_vibes=snap_data.get("vfx_vibes"),
             physical_description=snap_data.get("physical_description"),
-            visual_importance=snap_data.get("visual_importance", 5),
+            visual_importance=_normalize_visual_importance(snap_data.get("visual_importance")),
             extraction_version=extraction_version,
         )
 
@@ -200,7 +200,7 @@ def _apply_patch(base: Optional[dict], patch: CharacterPatch) -> dict:
     base_outfit = base["outfit"] if base else None
     base_weapon = base["weapon"] if base else None
     base_vfx = base["vfx_vibes"] if base else None
-    base_vi = base["visual_importance"] if base else 5
+    base_vi = _normalize_visual_importance(base.get("visual_importance") if base else None)
     base_active = bool(base["is_active"]) if base else True
 
     # Persistent: inherit when patch is None
@@ -213,7 +213,7 @@ def _apply_patch(base: Optional[dict], patch: CharacterPatch) -> dict:
     merged["physical_description"] = patch.physical_description
 
     # visual_importance: inherit when patch is None
-    merged["visual_importance"] = patch.visual_importance if patch.visual_importance is not None else base_vi
+    merged["visual_importance"] = _normalize_visual_importance(patch.visual_importance, default=base_vi)
 
     # is_active: inherit unless explicitly set
     merged["is_active"] = patch.is_active if patch.is_active is not None else base_active
@@ -239,9 +239,21 @@ def _count_changes(base: Optional[dict], merged: dict) -> int:
     for merged_key, base_key in field_map.items():
         base_val = base.get(base_key)
         new_val = merged.get(merged_key)
+        if merged_key == "visual_importance":
+            base_val = _normalize_visual_importance(base_val)
+            new_val = _normalize_visual_importance(new_val)
         # Normalize booleans from SQLite (stored as 0/1)
         if isinstance(base_val, int) and merged_key == "is_active":
             base_val = bool(base_val)
         if base_val != new_val:
             count += 1
     return count
+
+
+def _normalize_visual_importance(value: Optional[int], default: int = 5) -> int:
+    """Force visual_importance into [1..10], fallback to default when missing/invalid."""
+    try:
+        ivalue = int(value) if value is not None else int(default)
+    except (TypeError, ValueError):
+        return int(default)
+    return max(1, min(10, ivalue))
