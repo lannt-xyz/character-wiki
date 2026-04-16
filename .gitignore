@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# uv
+.uv/
+
+# Data directories (large binary/text files)
+data/chapters/
+data/wiki/
+
+# Database
+db/pipeline.db
+db/*.db
+
+# Logs
+logs/
+
+# Assets (user-provided)
+assets/music/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ComfyUI output (if symlinked)
+ComfyUI/output/

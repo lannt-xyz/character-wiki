@@ -1,0 +1,28 @@
+# Story source
+story_slug: "mao-son-troc-quy-nhan"
+base_url: "https://truyencv.io/truyen/{story_slug}/chuong-{n}/"
+total_chapters: 3534
+
+# API endpoints
+ollama_url: "http://localhost:11434"
+
+# LLM configuration
+llm_timeout: 120
+llm_max_retries: 3
+
+# Paths (relative to project root)
+data_dir: "data"
+db_path: "db/pipeline.db"
+logs_dir: "logs"
+
+# Crawler
+crawler_rate_limit: 1.0
+crawler_max_retries: 5
+crawler_delay_sec: 1.0
+
+# Wiki extraction
+wiki_batch_size: 5
+wiki_extract_model: "gemma4-32k:latest"
+wiki_context_threshold: 50
+wiki_max_consecutive_fail: 5
+wiki_snapshot_min_change: 1
