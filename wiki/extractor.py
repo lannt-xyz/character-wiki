@@ -299,4 +299,11 @@ def extract_batch(
 
 def _normalize(name: str) -> str:
     import unicodedata
-    return unicodedata.normalize("NFC", name).lower().strip()
+    import re
+
+    name = name.replace("đ", "d").replace("Đ", "D")
+    name = unicodedata.normalize("NFD", name)
+    name = "".join(c for c in name if unicodedata.category(c) != "Mn")
+    name = name.lower().strip()
+    name = re.sub(r"[^a-z0-9]+", " ", name)
+    return re.sub(r"\s+", " ", name).strip()

@@ -23,6 +23,7 @@ import re
 import shutil
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -53,7 +54,12 @@ _PROJECT_ROOT = Path(__file__).parent
 _RERUN_DIR = _PROJECT_ROOT / settings.data_dir / "rerun"
 _CHAR_INPUT_DIR = _RERUN_DIR / "character_input"
 _DB_PATH = _PROJECT_ROOT / settings.db_path
-_DB_BACKUP_PATH = _PROJECT_ROOT / "db" / "pipeline.db.bak"
+
+
+def _build_db_backup_path() -> Path:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Example: mao-son-troc-quy-nhan_20260417_123456.db.bak
+    return _DB_PATH.with_name(f"{_DB_PATH.stem}_{ts}{_DB_PATH.suffix}.bak")
 
 # ---------------------------------------------------------------------------
 # Remaster prompts
@@ -75,7 +81,7 @@ Trả về JSON với cấu trúc:
 {{
   "character_id": "{character_id}",
   "name": "<tên đầy đủ>",
-  "aliases": ["<biệt danh>"],
+        artifact_id = db.upsert_artifact(
   "gender": "male|female|unknown",
   "faction": "<môn phái / phe phái hoặc null>",
   "visual_anchor": "<đặc điểm ngoại hình cố định bằng tiếng Anh, đủ để nhận dạng qua các chương>",
@@ -85,7 +91,7 @@ Trả về JSON với cấu trúc:
   ],
   "peak_snapshot": {{
     "level": "<cảnh giới cao nhất đạt được>",
-    "outfit": "<trang phục đặc trưng nhất>",
+        db.upsert_artifact(
     "weapon": "<vũ khí chính>",
     "vfx_vibes": "<mô tả hiệu ứng hình ảnh đặc trưng>",
     "visual_importance": <1-10>
@@ -265,6 +271,61 @@ def _seed_artifact_stubs(db: SQLiteDB, artifact_names: list[str], dry_run: bool 
     logger.info("_seed_artifact_stubs | {} stub records upserted", seeded)
 
 
+def _deduplicate_characters_phase2(db: SQLiteDB, dry_run: bool = False) -> int:
+    """Merge duplicate character rows by canonicalized display name.
+
+    Canonical pick priority:
+    1) character_id == slugify_vi(name)
+    2) highest snapshot count
+    3) lexicographically smaller character_id
+    """
+    chars = db.get_all_characters(include_deleted=False)
+    groups: dict[str, list[dict]] = {}
+    for char in chars:
+        key = slugify_vi(char.get("name") or "")
+        if not key:
+            continue
+        groups.setdefault(key, []).append(char)
+
+    merged_total = 0
+    for key, members in groups.items():
+        if len(members) <= 1:
+            continue
+
+        scored = []
+        for c in members:
+            cid = c["character_id"]
+            score = (
+                1 if cid == key else 0,
+                db.get_character_snapshot_count(cid),
+                -len(cid),
+            )
+            scored.append((score, cid))
+        scored.sort(reverse=True)
+        canonical_id = scored[0][1]
+        duplicate_ids = [c["character_id"] for c in members if c["character_id"] != canonical_id]
+
+        logger.warning(
+            "Phase 2 dedup | name_key={} canonical={} duplicates={}",
+            key,
+            canonical_id,
+            duplicate_ids,
+        )
+        if dry_run:
+            continue
+        merged_total += db.merge_character_records(
+            canonical_id=canonical_id,
+            duplicate_ids=duplicate_ids,
+            reason="phase2_name_dedup",
+        )
+
+    if merged_total:
+        logger.info("Phase 2 dedup done | {} duplicate rows merged", merged_total)
+    else:
+        logger.info("Phase 2 dedup done | no duplicates found")
+    return merged_total
+
+
 def _build_character_markdown(
     char: dict, snapshots: list[dict], db: SQLiteDB, artifact_names: Optional[list[str]] = None
 ) -> str:
@@ -344,8 +405,9 @@ def _backup_db(dry_run: bool = False) -> None:
     if dry_run:
         logger.info("dry_run: skip DB backup")
         return
-    shutil.copy(str(_DB_PATH), str(_DB_BACKUP_PATH))
-    logger.info("DB backed up to {}", _DB_BACKUP_PATH)
+    backup_path = _build_db_backup_path()
+    shutil.copy(str(_DB_PATH), str(backup_path))
+    logger.info("DB backed up to {}", backup_path)
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +443,10 @@ def phase2_build_input(db: SQLiteDB, dry_run: bool = False) -> list[dict]:
     Artifact stubs are inserted into wiki_artifacts so Phase 3 loop can use them from batch 1.
     """
     logger.info("=== Phase 2: Build character input + seed artifact stubs ===")
+
+    # Ensure one active row per character before generating markdown files.
+    _deduplicate_characters_phase2(db, dry_run)
+
     top_chars = db.get_top_characters_by_snapshot(limit=20)
     if not top_chars:
         logger.warning("No characters found in DB. Run main pipeline first.")
@@ -492,7 +558,7 @@ def _merge_artifact_updates(
 
         # Upsert artifact (create stub or enrich existing record with new metadata)
         name = upd.get("name") or raw_id.replace("_", " ").title()
-        db.upsert_artifact(
+        artifact_id = db.upsert_artifact(
             artifact_id=artifact_id,
             name=name,
             name_normalized=normalize_name(name),

@@ -32,7 +32,13 @@ _ALL_SNAPSHOT_FIELDS = _PERSISTENT_FIELDS + _TRANSIENT_FIELDS + ("visual_importa
 
 
 def normalize_name(name: str) -> str:
-    return unicodedata.normalize("NFC", name).lower().strip()
+    # Normalize to a stable key: remove diacritics and separator noise.
+    name = name.replace("đ", "d").replace("Đ", "D")
+    name = unicodedata.normalize("NFD", name)
+    name = "".join(c for c in name if unicodedata.category(c) != "Mn")
+    name = name.lower().strip()
+    name = re.sub(r"[^a-z0-9]+", " ", name)
+    return re.sub(r"\s+", " ", name).strip()
 
 
 def slugify_vi(text: str) -> str:
@@ -83,7 +89,7 @@ def merge_extraction_result(
 
         # Reuse existing character_id if name_normalized already exists
         # (LLM may return different id variants for the same name)
-        _existing = db.get_character_by_name(name_norm)
+        _existing = db.get_character_by_name(name_norm, include_deleted=True)
         if _existing and _existing["character_id"] != character_id:
             logger.debug(
                 "Reusing existing character_id | old={} new={} name_norm={}",

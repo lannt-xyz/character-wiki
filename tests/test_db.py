@@ -161,3 +161,72 @@ class TestGetCharactersByNames:
         db.upsert_character("hero_001", "Lâm Phong", "lâm phong", ["lâm sư huynh"], [], None)
         result = db.get_characters_by_names(["lâm sư huynh"])
         assert any(r["character_id"] == "hero_001" for r in result)
+
+
+class TestCharacterLogicalDeleteAndMerge:
+    def test_deleted_character_hidden_by_default(self, db):
+        db.upsert_character("canon_001", "Diệp Thiếu Dương", "diep thieu duong", [], [], None)
+        db.upsert_character("dup_001", "Diệp Thiếu Dương", "diem_thieu_duong", [], [], None)
+
+        merged = db.merge_character_records("canon_001", ["dup_001"])
+        assert merged == 1
+
+        assert db.get_character_by_id("dup_001") is None
+        deleted = db.get_character_by_id("dup_001", include_deleted=True)
+        assert deleted is not None
+        assert deleted["is_deleted"] == 1
+        assert deleted["merged_into_character_id"] == "canon_001"
+
+    def test_merge_moves_snapshots_relations_and_artifact_owner(self, db):
+        db.upsert_character("canon_001", "Diệp Thiếu Dương", "diep thieu duong", [], [], None)
+        db.upsert_character("dup_001", "Diệp Thiếu Dương", "diep_shieu_duong", ["Tiểu Dương"], [], None)
+
+        db.add_snapshot(
+            character_id="canon_001",
+            chapter_start=10,
+            is_active=True,
+            level="A",
+            outfit=None,
+            weapon=None,
+            vfx_vibes=None,
+            physical_description=None,
+            visual_importance=5,
+            extraction_version=1,
+        )
+        db.add_snapshot(
+            character_id="dup_001",
+            chapter_start=20,
+            is_active=True,
+            level="B",
+            outfit=None,
+            weapon=None,
+            vfx_vibes=None,
+            physical_description=None,
+            visual_importance=5,
+            extraction_version=1,
+        )
+        db.add_relation("dup_001", "a_ngoc", "friend", 20)
+
+        db.upsert_artifact("kiem_001", "Kiếm", "kiem")
+        db.add_artifact_snapshot(
+            artifact_id="kiem_001",
+            chapter_start=20,
+            owner_id="dup_001",
+            normal_state=None,
+            active_state=None,
+        )
+
+        db.merge_character_records("canon_001", ["dup_001"])
+
+        snaps = db.get_all_snapshots("canon_001")
+        assert len(snaps) == 2
+        assert snaps[0]["chapter_start"] == 10
+        assert snaps[1]["chapter_start"] == 20
+
+        rels = db.get_relations("canon_001")
+        assert len(rels) == 1
+        assert rels[0]["related_name"] == "a_ngoc"
+
+        art_snap = db.get_latest_artifact_snapshot("kiem_001")
+        assert art_snap is not None
+        assert art_snap["owner_id"] == "canon_001"

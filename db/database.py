@@ -1,5 +1,7 @@
 import json
+import re
 import sqlite3
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -144,6 +146,9 @@ class SQLiteDB:
             ("gender", "TEXT"),
             ("personality", "TEXT"),
             ("remaster_version", "INTEGER DEFAULT 1"),
+            ("is_deleted", "INTEGER NOT NULL DEFAULT 0"),
+            ("merged_into_character_id", "TEXT"),
+            ("deleted_at", "TEXT"),
         ]:
             if col_name not in existing_chars:
                 self._conn.execute(
@@ -240,6 +245,9 @@ class SQLiteDB:
                 aliases_json=excluded.aliases_json,
                 traits_json=excluded.traits_json,
                 visual_anchor=excluded.visual_anchor,
+                is_deleted=0,
+                merged_into_character_id=NULL,
+                deleted_at=NULL,
                 updated_at=excluded.updated_at
             """,
             (
@@ -271,48 +279,192 @@ class SQLiteDB:
         )
         self._conn.commit()
 
-    def get_character_by_name(self, name_normalized: str) -> Optional[dict]:
+    def get_character_by_name(self, name_normalized: str, include_deleted: bool = False) -> Optional[dict]:
         row = self._conn.execute(
-            "SELECT * FROM wiki_characters WHERE name_normalized=?",
-            (name_normalized,),
+            "SELECT * FROM wiki_characters WHERE name_normalized=? "
+            "AND (? OR is_deleted=0)",
+            (name_normalized, int(include_deleted)),
         ).fetchone()
-        return dict(row) if row else None
+        if row:
+            return dict(row)
 
-    def get_characters_by_names(self, names_normalized: list[str]) -> list[dict]:
-        """Bulk fetch by name_normalized. Also searches inside aliases_json."""
+        # Fallback: tolerate inconsistent separators/diacritics from historical data.
+        needle = _normalize_lookup_key(name_normalized)
+        if not needle:
+            return None
+        rows = self._conn.execute(
+            "SELECT * FROM wiki_characters WHERE ? OR is_deleted=0",
+            (int(include_deleted),),
+        ).fetchall()
+        for cand in rows:
+            if _normalize_lookup_key(cand["name_normalized"]) == needle:
+                return dict(cand)
+        return None
+
+    def get_characters_by_names(
+        self, names_normalized: list[str], include_deleted: bool = False
+    ) -> list[dict]:
+        """Bulk fetch by normalized names/aliases with tolerant matching."""
         if not names_normalized:
             return []
-        placeholders = ",".join("?" for _ in names_normalized)
-        # Match exact name_normalized OR name appears inside aliases_json blob
-        rows = self._conn.execute(
-            f"SELECT * FROM wiki_characters WHERE name_normalized IN ({placeholders})",
-            names_normalized,
-        ).fetchall()
-        found_ids = {r["character_id"] for r in rows}
-        result = [dict(r) for r in rows]
+        needles = {_normalize_lookup_key(n) for n in names_normalized if _normalize_lookup_key(n)}
+        if not needles:
+            return []
 
-        # Also search aliases
-        alias_rows = self._conn.execute(
-            "SELECT * FROM wiki_characters"
+        rows = self._conn.execute(
+            "SELECT * FROM wiki_characters WHERE ? OR is_deleted=0",
+            (int(include_deleted),),
         ).fetchall()
-        for row in alias_rows:
-            if row["character_id"] in found_ids:
-                continue
+        result: list[dict] = []
+        for row in rows:
             aliases: list[str] = json.loads(row["aliases_json"])
-            if any(a.lower().strip() in names_normalized for a in aliases):
+            candidates = {
+                _normalize_lookup_key(row["name_normalized"]),
+                _normalize_lookup_key(row["name"]),
+            }
+            candidates.update(_normalize_lookup_key(a) for a in aliases)
+            if needles.intersection(candidates):
                 result.append(dict(row))
-                found_ids.add(row["character_id"])
         return result
 
-    def get_all_characters(self) -> list[dict]:
-        rows = self._conn.execute("SELECT * FROM wiki_characters").fetchall()
+    def get_all_characters(self, include_deleted: bool = False) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM wiki_characters WHERE ? OR is_deleted=0",
+            (int(include_deleted),),
+        ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_character_by_id(self, character_id: str) -> Optional[dict]:
+    def get_character_by_id(self, character_id: str, include_deleted: bool = False) -> Optional[dict]:
         row = self._conn.execute(
-            "SELECT * FROM wiki_characters WHERE character_id=?", (character_id,)
+            "SELECT * FROM wiki_characters WHERE character_id=? AND (? OR is_deleted=0)",
+            (character_id, int(include_deleted)),
         ).fetchone()
         return dict(row) if row else None
+
+    def get_character_snapshot_count(self, character_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM wiki_snapshots WHERE character_id=?",
+            (character_id,),
+        ).fetchone()
+        return row["c"] if row else 0
+
+    def merge_character_records(
+        self,
+        canonical_id: str,
+        duplicate_ids: list[str],
+        reason: str = "duplicate_character_id",
+    ) -> int:
+        """Merge duplicate character rows into canonical row using logical delete.
+
+        - Move snapshots/relations/artifact owners to canonical_id.
+        - Keep duplicate identity rows for audit by marking is_deleted=1.
+        """
+        canonical = self.get_character_by_id(canonical_id, include_deleted=True)
+        if not canonical:
+            raise ValueError(f"canonical character not found: {canonical_id}")
+
+        dup_ids = [cid for cid in dict.fromkeys(duplicate_ids) if cid and cid != canonical_id]
+        if not dup_ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in dup_ids)
+        existing_dups = self._conn.execute(
+            f"SELECT * FROM wiki_characters WHERE character_id IN ({placeholders})",
+            dup_ids,
+        ).fetchall()
+        if not existing_dups:
+            return 0
+
+        now = _dt(_now())
+        merged_count = 0
+
+        self._conn.execute("BEGIN")
+        try:
+            canonical_aliases = set(json.loads(canonical.get("aliases_json") or "[]"))
+            canonical_traits = set(json.loads(canonical.get("traits_json") or "[]"))
+
+            for dup_row in existing_dups:
+                dup = dict(dup_row)
+                dup_id = dup["character_id"]
+                if dup["is_deleted"]:
+                    continue
+
+                canonical_aliases.update(json.loads(dup["aliases_json"] or "[]"))
+                canonical_traits.update(json.loads(dup["traits_json"] or "[]"))
+
+                # Keep richer canonical identity when available.
+                if (not canonical.get("visual_anchor")) and dup.get("visual_anchor"):
+                    canonical["visual_anchor"] = dup["visual_anchor"]
+                if (not canonical.get("faction")) and dup.get("faction"):
+                    canonical["faction"] = dup["faction"]
+                if (not canonical.get("gender")) and dup.get("gender"):
+                    canonical["gender"] = dup["gender"]
+                if (not canonical.get("personality")) and dup.get("personality"):
+                    canonical["personality"] = dup["personality"]
+
+                self._conn.execute(
+                    "UPDATE wiki_snapshots SET character_id=? WHERE character_id=?",
+                    (canonical_id, dup_id),
+                )
+                self._conn.execute(
+                    "UPDATE wiki_relations SET character_id=? WHERE character_id=?",
+                    (canonical_id, dup_id),
+                )
+                self._conn.execute(
+                    "UPDATE wiki_artifact_snapshots SET owner_id=? WHERE owner_id=?",
+                    (canonical_id, dup_id),
+                )
+                self._conn.execute(
+                    """
+                    UPDATE wiki_characters
+                    SET is_deleted=1,
+                        merged_into_character_id=?,
+                        deleted_at=?,
+                        updated_at=?
+                    WHERE character_id=?
+                    """,
+                    (canonical_id, now, now, dup_id),
+                )
+                merged_count += 1
+
+            self._conn.execute(
+                """
+                UPDATE wiki_characters
+                SET aliases_json=?,
+                    traits_json=?,
+                    visual_anchor=coalesce(?, visual_anchor),
+                    faction=coalesce(?, faction),
+                    gender=coalesce(?, gender),
+                    personality=coalesce(?, personality),
+                    is_deleted=0,
+                    merged_into_character_id=NULL,
+                    deleted_at=NULL,
+                    updated_at=?
+                WHERE character_id=?
+                """,
+                (
+                    json.dumps(sorted(canonical_aliases), ensure_ascii=False),
+                    json.dumps(sorted(canonical_traits), ensure_ascii=False),
+                    canonical.get("visual_anchor"),
+                    canonical.get("faction"),
+                    canonical.get("gender"),
+                    canonical.get("personality"),
+                    now,
+                    canonical_id,
+                ),
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+        logger.info(
+            "merge_character_records | canonical={} merged={} reason={}",
+            canonical_id,
+            merged_count,
+            reason,
+        )
+        return merged_count
 
     # ------------------------------------------------------------------
     # wiki_snapshots table — APPEND ONLY, never UPDATE
@@ -518,7 +670,7 @@ class SQLiteDB:
         return {
             "total_batches": self.count_total_batches(),
             "merged_batches": self.count_merged_batches(),
-            "total_characters": self._scalar("SELECT COUNT(*) FROM wiki_characters"),
+            "total_characters": self._scalar("SELECT COUNT(*) FROM wiki_characters WHERE is_deleted=0"),
             "total_snapshots": self._scalar("SELECT COUNT(*) FROM wiki_snapshots"),
         }
 
@@ -582,7 +734,7 @@ class SQLiteDB:
             SELECT c.*, COUNT(s.id) as snap_count
             FROM wiki_characters c
             JOIN wiki_snapshots s ON s.character_id = c.character_id
-            WHERE s.extraction_version = 1
+            WHERE s.extraction_version = 1 AND c.is_deleted = 0
             GROUP BY c.character_id
             ORDER BY snap_count DESC
             LIMIT ?
@@ -663,7 +815,14 @@ class SQLiteDB:
         material: Optional[str] = None,
         visual_anchor: Optional[str] = None,
         description: Optional[str] = None,
-    ) -> None:
+    ) -> str:
+        existing = self._conn.execute(
+            "SELECT artifact_id FROM wiki_artifacts WHERE name_normalized=?",
+            (name_normalized,),
+        ).fetchone()
+        if existing and existing["artifact_id"] != artifact_id:
+            artifact_id = existing["artifact_id"]
+
         now = _dt(_now())
         self._conn.execute(
             """
@@ -680,6 +839,7 @@ class SQLiteDB:
             (artifact_id, name, name_normalized, rarity, material, visual_anchor, description, now),
         )
         self._conn.commit()
+        return artifact_id
 
     def add_artifact_snapshot(
         self,
@@ -763,3 +923,14 @@ def _now() -> datetime:
 
 def _dt(dt: datetime) -> str:
     return dt.isoformat()
+
+
+def _normalize_lookup_key(text: str) -> str:
+    if not text:
+        return ""
+    text = text.replace("đ", "d").replace("Đ", "D")
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    text = text.lower().strip()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
