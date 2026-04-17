@@ -20,7 +20,6 @@ def save_chapter(chapter: ChapterMeta, db) -> bool:
         chapter_num=chapter.chapter_num,
         title=chapter.title,
         url=chapter.url,
-        file_path="",
         status="CRAWLED",
         crawled_at=datetime.now(timezone.utc),
         content=chapter.content,

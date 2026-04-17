@@ -41,7 +41,6 @@ class SQLiteDB:
                 chapter_num  INTEGER PRIMARY KEY,
                 title        TEXT,
                 url          TEXT,
-                file_path    TEXT,
                 status       TEXT NOT NULL DEFAULT 'PENDING',
                 crawled_at   TEXT,
                 error_msg    TEXT
@@ -158,6 +157,9 @@ class SQLiteDB:
         }
         if "content" not in existing_chapters:
             self._conn.execute("ALTER TABLE chapters ADD COLUMN content TEXT")
+        # Drop file_path column if still present (SQLite >= 3.35)
+        if "file_path" in existing_chapters:
+            self._conn.execute("ALTER TABLE chapters DROP COLUMN file_path")
 
         self._conn.commit()
 
@@ -170,7 +172,6 @@ class SQLiteDB:
         chapter_num: int,
         title: str,
         url: str,
-        file_path: str,
         status: str,
         crawled_at: Optional[datetime] = None,
         content: Optional[str] = None,
@@ -178,17 +179,16 @@ class SQLiteDB:
         now = _now()
         self._conn.execute(
             """
-            INSERT INTO chapters(chapter_num, title, url, file_path, status, crawled_at, content)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO chapters(chapter_num, title, url, status, crawled_at, content)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(chapter_num) DO UPDATE SET
                 title=excluded.title,
                 url=excluded.url,
-                file_path=excluded.file_path,
                 status=excluded.status,
                 crawled_at=excluded.crawled_at,
                 content=excluded.content
             """,
-            (chapter_num, title, url, file_path, status, _dt(crawled_at or now), content),
+            (chapter_num, title, url, status, _dt(crawled_at or now), content),
         )
         self._conn.commit()
 
