@@ -16,8 +16,7 @@ build/
 .uv/
 
 # Data directories (large binary/text files)
-data/chapters/
-data/wiki/
+data/
 
 # Database
 db/pipeline.db
