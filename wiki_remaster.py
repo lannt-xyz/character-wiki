@@ -174,14 +174,14 @@ Quy tắc:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load_batch_text(chapter_start: int, chapter_end: int) -> str:
+def _load_batch_text(chapter_start: int, chapter_end: int, db: SQLiteDB) -> str:
     parts = []
     for ch_num in range(chapter_start, chapter_end + 1):
-        content = load_chapter_content(ch_num)
+        content = load_chapter_content(ch_num, db)
         if content:
             parts.append(f"\n--- Chương {ch_num} ---\n{content}")
         else:
-            logger.warning("Missing chapter file | ch={}", ch_num)
+            logger.warning("Missing chapter content in DB | ch={}", ch_num)
     return "\n".join(parts)
 
 
@@ -266,7 +266,7 @@ def _seed_artifact_stubs(db: SQLiteDB, artifact_names: list[str], dry_run: bool 
 
 
 def _build_character_markdown(
-    char: dict, snapshots: list[dict], artifact_names: Optional[list[str]] = None
+    char: dict, snapshots: list[dict], db: SQLiteDB, artifact_names: Optional[list[str]] = None
 ) -> str:
     """Render character identity + milestone snapshot table + optional artifact seed list."""
     aliases_raw = char.get("aliases_json") or "[]"
@@ -325,7 +325,7 @@ def _build_character_markdown(
         lines.append("")
         lines.append("=== Trích đoạn chương nguồn ===")
         for ch_num in selected:
-            content = load_chapter_content(ch_num)
+            content = load_chapter_content(ch_num, db)
             if content:
                 excerpt = content[:_EXCERPT_CHARS].replace("\n", " ")
                 lines.append(f"\n[Chương {ch_num}]: {excerpt}...")
@@ -400,7 +400,7 @@ def phase2_build_input(db: SQLiteDB, dry_run: bool = False) -> list[dict]:
             s for s in db.get_all_snapshots(cid)
             if s.get("extraction_version", 1) == 1
         ]
-        md = _build_character_markdown(char, snapshots_v1, artifact_names=artifact_names)
+        md = _build_character_markdown(char, snapshots_v1, db=db, artifact_names=artifact_names)
         out_path = _CHAR_INPUT_DIR / f"{cid}.md"
         if not dry_run:
             out_path.write_text(md, encoding="utf-8")
@@ -571,8 +571,8 @@ def phase3_extraction_loop(db: SQLiteDB, dry_run: bool = False) -> None:
             batch_id, total, pct, chapter_start, chapter_end,
         )
 
-        # Load raw text (files already exist from v1 pipeline)
-        batch_text = _load_batch_text(chapter_start, chapter_end)
+        # Load raw text from DB
+        batch_text = _load_batch_text(chapter_start, chapter_end, db)
         if not batch_text.strip():
             logger.warning("Empty batch text | batch={} — skip", batch_id)
             if not dry_run:
@@ -693,7 +693,7 @@ def phase4_final_synthesis(db: SQLiteDB, dry_run: bool = False) -> None:
             logger.info("Phase 4 | {} | no v2 snapshots yet (Phase 3 not run?), skip", cid)
             continue
 
-        md = _build_character_markdown(char, v2_snaps)
+        md = _build_character_markdown(char, v2_snaps, db=db)
         prompt = _REMASTER_USER_TMPL.format(character_md=md, character_id=cid)
 
         logger.info("Phase 4 | {} | {} v2 snaps → LLM synthesis...", cid, len(v2_snaps))

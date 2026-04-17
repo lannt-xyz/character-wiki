@@ -10,6 +10,7 @@ Pass 2 — Delta Extract:
 """
 
 import json
+import time
 from typing import Optional
 
 import httpx
@@ -121,9 +122,12 @@ def _ollama_generate(prompt: str, system: str, model: str) -> str:
         "stream": False,
         "format": "json",
     }
+    t0 = time.monotonic()
     with httpx.Client(timeout=settings.llm_timeout) as client:
         resp = client.post(f"{settings.ollama_url}/api/generate", json=payload)
         resp.raise_for_status()
+    elapsed = time.monotonic() - t0
+    logger.debug("Ollama request done | model={} elapsed={:.1f}s", model, elapsed)
     return resp.json()["response"]
 
 

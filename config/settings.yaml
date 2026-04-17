@@ -1,7 +1,7 @@
 # Story source
 story_slug: "mao-son-troc-quy-nhan"
 base_url: "https://truyencv.io/truyen/{story_slug}/chuong-{n}/"
-total_chapters: 3534
+total_chapters: 3682
 
 # API endpoints
 ollama_url: "http://localhost:11434"

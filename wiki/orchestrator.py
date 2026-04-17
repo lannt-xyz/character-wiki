@@ -82,9 +82,9 @@ def run_pipeline(
     total_batches = len(all_batches)
 
     if from_batch is not None:
-        pending = [b for b in all_batches if b["batch_id"] >= from_batch and b["status"] != "MERGED"]
+        pending = [b for b in all_batches if b["batch_id"] >= from_batch and b["status"] not in ("MERGED", "FAILED")]
     else:
-        pending = [b for b in all_batches if b["status"] != "MERGED"]
+        pending = [b for b in all_batches if b["status"] not in ("MERGED", "FAILED")]
 
     if max_batches is not None:
         pending = pending[:max_batches]
@@ -144,6 +144,23 @@ def run_pipeline(
                     else:
                         logger.debug("dry_run: skip save_chapter for ch {}", ch.chapter_num)
 
+                # If every chapter in the batch failed, mark batch FAILED and skip
+                all_failed = all(ch.status == "ERROR" for ch in chapters)
+                if all_failed:
+                    logger.warning(
+                        "All chapters failed | batch={} Ch {}-{} → marking FAILED",
+                        batch_id, chapter_start, chapter_end,
+                    )
+                    if not dry_run:
+                        db.upsert_batch(
+                            batch_id=batch_id,
+                            chapter_start=chapter_start,
+                            chapter_end=chapter_end,
+                            status="FAILED",
+                            extraction_version=extraction_version,
+                        )
+                    continue
+
                 if not dry_run:
                     db.upsert_batch(
                         batch_id=batch_id,
@@ -160,7 +177,7 @@ def run_pipeline(
             # Step 2: Load text for extraction
             # ------------------------------------------------------------
             if status in ("CRAWLED", "EXTRACTED"):
-                batch_text = _load_batch_text(chapter_start, chapter_end)
+                batch_text = _load_batch_text(chapter_start, chapter_end, db)
                 if not batch_text.strip():
                     logger.warning("Empty batch text | batch={}", batch_id)
 
@@ -241,11 +258,11 @@ def run_pipeline(
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _load_batch_text(chapter_start: int, chapter_end: int) -> str:
-    """Concatenate chapter text files for the batch range."""
+def _load_batch_text(chapter_start: int, chapter_end: int, db: SQLiteDB) -> str:
+    """Concatenate chapter text from DB for the batch range."""
     parts = []
     for ch_num in range(chapter_start, chapter_end + 1):
-        content = load_chapter_content(ch_num)
+        content = load_chapter_content(ch_num, db)
         if content:
             parts.append(f"\n--- Chương {ch_num} ---\n{content}")
         else:

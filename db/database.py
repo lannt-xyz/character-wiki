@@ -136,7 +136,7 @@ class SQLiteDB:
 
     def _migrate(self) -> None:
         """Add new columns to existing tables if not present (safe to run repeatedly)."""
-        existing = {
+        existing_chars = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(wiki_characters)").fetchall()
         }
@@ -146,10 +146,19 @@ class SQLiteDB:
             ("personality", "TEXT"),
             ("remaster_version", "INTEGER DEFAULT 1"),
         ]:
-            if col_name not in existing:
+            if col_name not in existing_chars:
                 self._conn.execute(
                     f"ALTER TABLE wiki_characters ADD COLUMN {col_name} {col_def}"
                 )
+
+        # Migrate chapters table: add content column if missing
+        existing_chapters = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(chapters)").fetchall()
+        }
+        if "content" not in existing_chapters:
+            self._conn.execute("ALTER TABLE chapters ADD COLUMN content TEXT")
+
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -164,22 +173,31 @@ class SQLiteDB:
         file_path: str,
         status: str,
         crawled_at: Optional[datetime] = None,
+        content: Optional[str] = None,
     ) -> None:
         now = _now()
         self._conn.execute(
             """
-            INSERT INTO chapters(chapter_num, title, url, file_path, status, crawled_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO chapters(chapter_num, title, url, file_path, status, crawled_at, content)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chapter_num) DO UPDATE SET
                 title=excluded.title,
                 url=excluded.url,
                 file_path=excluded.file_path,
                 status=excluded.status,
-                crawled_at=excluded.crawled_at
+                crawled_at=excluded.crawled_at,
+                content=excluded.content
             """,
-            (chapter_num, title, url, file_path, status, _dt(crawled_at or now)),
+            (chapter_num, title, url, file_path, status, _dt(crawled_at or now), content),
         )
         self._conn.commit()
+
+    def get_chapter_content(self, chapter_num: int) -> Optional[str]:
+        """Return raw chapter text stored in DB, or None if not found."""
+        row = self._conn.execute(
+            "SELECT content FROM chapters WHERE chapter_num=?", (chapter_num,)
+        ).fetchone()
+        return row["content"] if row else None
 
     def set_chapter_status(
         self, chapter_num: int, status: str, error_msg: Optional[str] = None
