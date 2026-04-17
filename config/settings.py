@@ -75,8 +75,8 @@ class Settings(BaseSettings):
 
     @property
     def db_path(self) -> str:
-        """DB path derived from story_slug: db/<story_slug>.db"""
-        return f"db/{self.story_slug}.db"
+        """DB path derived from story_slug: data/<story_slug>.db"""
+        return f"{self.data_dir}/{self.story_slug}.db"
 
 
 settings = Settings()
