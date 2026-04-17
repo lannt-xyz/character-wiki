@@ -45,7 +45,6 @@ class Settings(BaseSettings):
 
     # Paths
     data_dir: str = "data"
-    db_path: str = "db/pipeline.db"
     logs_dir: str = "logs"
 
     # Crawler
@@ -73,6 +72,11 @@ class Settings(BaseSettings):
             .replace("{story_slug}", self.story_slug)
             .replace("{n}", str(chapter_num))
         )
+
+    @property
+    def db_path(self) -> str:
+        """DB path derived from story_slug: db/<story_slug>.db"""
+        return f"db/{self.story_slug}.db"
 
 
 settings = Settings()

@@ -12,7 +12,6 @@ llm_max_retries: 3
 
 # Paths (relative to project root)
 data_dir: "data"
-db_path: "db/pipeline.db"
 logs_dir: "logs"
 
 # Crawler
