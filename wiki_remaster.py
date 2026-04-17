@@ -53,6 +53,7 @@ from wiki.merger import merge_extraction_result, normalize_name, slugify_vi
 _PROJECT_ROOT = Path(__file__).parent
 _RERUN_DIR = _PROJECT_ROOT / settings.data_dir / "rerun"
 _CHAR_INPUT_DIR = _RERUN_DIR / "character_input"
+_LLM_REQUEST_DIR = _PROJECT_ROOT / settings.data_dir / "llm_requests"
 _DB_PATH = _PROJECT_ROOT / settings.db_path
 
 
@@ -176,6 +177,64 @@ Quy tắc:
 - Không nhắc đến nhân vật/pháp khí không xuất hiện trong đoạn này"""
 
 
+def _save_llm_request(batch_num: int, chapter_start: int, chapter_end: int, prompt: str, system: str) -> None:
+    """Save full LLM request as markdown for inspection."""
+    _LLM_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"pass2_ch{chapter_start:03d}-{chapter_end:03d}_batch{batch_num}.md"
+    filepath = _LLM_REQUEST_DIR / filename
+
+    content = f"""# LLM Request
+
+- Batch: {batch_num}
+- Chapters: {chapter_start}-{chapter_end}
+- Timestamp: {datetime.now().isoformat()}
+
+## System Prompt
+
+{system}
+
+## User Prompt
+
+{prompt}
+"""
+    filepath.write_text(content, encoding="utf-8")
+    logger.debug("Saved LLM request to {}", filepath)
+
+
+def _save_llm_response(batch_num: int, chapter_start: int, chapter_end: int, raw: str) -> None:
+    """Save raw LLM response as JSON for inspection."""
+    _LLM_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"pass2_ch{chapter_start:03d}-{chapter_end:03d}_batch{batch_num}.json"
+    filepath = _LLM_REQUEST_DIR / filename
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        payload = {
+            "_parse_error": str(exc),
+            "_raw": raw,
+        }
+
+    filepath.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.debug("Saved LLM response to {}", filepath)
+
+
+def _clear_llm_trace_dir() -> None:
+    """Remove old prompt/response trace files before a fresh run."""
+    if not _LLM_REQUEST_DIR.exists():
+        return
+    removed = 0
+    for path in _LLM_REQUEST_DIR.glob("pass2_ch*.*"):
+        if path.is_file():
+            path.unlink()
+            removed += 1
+    if removed:
+        logger.info("Cleared {} old LLM trace files from {}", removed, _LLM_REQUEST_DIR)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -191,6 +250,55 @@ def _load_batch_text(chapter_start: int, chapter_end: int, db: SQLiteDB) -> str:
     return "\n".join(parts)
 
 
+def _build_balanced_batch_excerpt(
+    batch_text: str,
+    chapter_start: int,
+    chapter_end: int,
+    max_chars: int = 12000,
+) -> str:
+    """Build a chapter-balanced excerpt so all chapters get represented.
+
+    Old behavior sliced from the beginning only, which could include just the first
+    1-2 chapters in long batches. This function allocates text budget per chapter.
+    """
+    if not batch_text.strip() or max_chars <= 0:
+        return ""
+
+    chapter_count = max(1, chapter_end - chapter_start + 1)
+    markers = list(re.finditer(r"\n--- Chương\s+(\d+)\s+---\n", batch_text))
+    if not markers:
+        return batch_text[:max_chars]
+
+    # Keep some room for separators and avoid very tiny per-chapter slices.
+    per_chapter_budget = max(300, max_chars // chapter_count)
+    chunks: list[str] = []
+
+    for idx, marker in enumerate(markers):
+        block_start = marker.start()
+        block_end = markers[idx + 1].start() if idx + 1 < len(markers) else len(batch_text)
+        block = batch_text[block_start:block_end]
+        chunks.append(block[:per_chapter_budget])
+
+    excerpt = "\n".join(chunks)
+    if len(excerpt) > max_chars:
+        excerpt = excerpt[:max_chars]
+    return excerpt
+
+
+def _text_has_phrase(batch_text: str, phrase: Optional[str]) -> bool:
+    """Return True when a normalized phrase appears in normalized batch text."""
+    if not phrase:
+        return False
+    needle = _normalize(phrase)
+    if not needle:
+        return False
+    # Skip overly generic single-token needles like "kiem" / "phu".
+    if " " not in needle and len(needle) < 5:
+        return False
+    haystack = f" {_normalize(batch_text)} "
+    return f" {needle} " in haystack
+
+
 def _pick_representative_chapters(chapter_nums: list[int], max_count: int) -> list[int]:
     """Pick evenly spaced chapters (always includes first + last)."""
     if not chapter_nums:
@@ -202,23 +310,82 @@ def _pick_representative_chapters(chapter_nums: list[int], max_count: int) -> li
     return [chapter_nums[i] for i in indices if i < len(chapter_nums)]
 
 
-def _build_artifact_context(db: SQLiteDB, chapter_start: int) -> str:
-    """Build compact artifact context JSON for the current chapter position."""
-    artifacts = db.get_all_artifacts()
+def _build_artifact_context(artifacts: list[dict]) -> str:
+    """Build markdown artifact context for the current chapter position."""
     if not artifacts:
-        return "[]"
-    context = []
+        return "- Không có pháp khí context"
+    lines: list[str] = []
     for art in artifacts:
-        snap = db.get_artifact_snapshot_at(art["artifact_id"], chapter_start)
-        context.append({
-            "artifact_id": art["artifact_id"],
-            "name": art["name"],
-            "material": art.get("material"),
-            "visual_anchor": art.get("visual_anchor"),
-            "latest_condition": snap["condition"] if snap else "intact",
-            "latest_owner": snap["owner_id"] if snap else None,
-        })
-    return json.dumps(context, ensure_ascii=False)
+        lines.append(f"### {art['name']} [{art['artifact_id']}]")
+        if art.get("rarity"):
+            lines.append(f"- Rarity: {art['rarity']}")
+        if art.get("material"):
+            lines.append(f"- Material: {art['material']}")
+        if art.get("visual_anchor"):
+            lines.append(f"- Visual anchor: {art['visual_anchor']}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _dedup_characters_for_context(characters: list[dict]) -> list[dict]:
+    """Deduplicate context rows by tolerant normalized name.
+
+    Keeps the first occurrence so caller can control priority order.
+    """
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for char in characters:
+        name_key = _normalize(char.get("name_normalized") or char.get("name") or char["character_id"])
+        if not name_key:
+            name_key = char["character_id"]
+        if name_key in seen:
+            continue
+        seen.add(name_key)
+        deduped.append(char)
+    return deduped
+
+
+def _select_candidate_characters(batch_text: str, all_chars: list[dict], max_total: int = 12) -> list[dict]:
+    """Select characters whose name or aliases appear directly in the batch text."""
+    matched: list[dict] = []
+    for char in all_chars:
+        aliases_raw = char.get("aliases_json") or "[]"
+        try:
+            aliases = json.loads(aliases_raw) if isinstance(aliases_raw, str) else (aliases_raw or [])
+        except Exception:
+            aliases = []
+        phrases = [char.get("name"), *aliases]
+        if any(_text_has_phrase(batch_text, phrase) for phrase in phrases):
+            matched.append(char)
+    return _dedup_characters_for_context(matched)[:max_total]
+
+
+def _select_candidate_artifacts(batch_text: str, all_artifacts: list[dict], max_total: int = 20) -> list[dict]:
+    """Select artifacts whose display name appears directly in the batch text."""
+    matched: list[dict] = []
+    for art in all_artifacts:
+        if _text_has_phrase(batch_text, art.get("name")):
+            matched.append(art)
+    return matched[:max_total]
+
+
+def _filter_artifacts_against_character_names(
+    artifacts: list[dict],
+    characters: list[dict],
+) -> list[dict]:
+    """Drop artifact rows whose names collide with character names in the same batch context."""
+    char_name_keys = {
+        _normalize(char.get("name_normalized") or char.get("name") or "")
+        for char in characters
+        if char.get("name_normalized") or char.get("name")
+    }
+    result: list[dict] = []
+    for art in artifacts:
+        art_name_key = _normalize(art.get("name") or art.get("artifact_id") or "")
+        if art_name_key and art_name_key in char_name_keys:
+            continue
+        result.append(art)
+    return result
 
 
 def _normalize_artifact_names(db: SQLiteDB, min_mentions: int = 3) -> list[str]:
@@ -428,8 +595,22 @@ def phase1_init_batches(db: SQLiteDB, dry_run: bool = False) -> None:
     if dry_run:
         logger.info("dry_run: skip init_remaster_batches")
         return
+    _clear_llm_trace_dir()
     count = db.init_remaster_batches()
-    logger.info("Phase 1 done | registered {} remaster batches", count)
+    
+    # Rebuild with configured batch_size (may differ from original wiki_batches)
+    # This allows Phase 3 to use larger windows than the initial pipeline
+    count = db.rebuild_remaster_batches(settings.wiki_batch_size)
+    
+    # Always wipe v2 snapshots on a full restart (Phase 1) so stale data from
+    # crashed runs cannot leak into character context and cascade wrong levels.
+    deleted, reset = db.reset_remaster_v2()
+    if deleted:
+        logger.warning(
+            "Phase 1 | Purged {} stale v2 snapshots and reset {} batches to PENDING",
+            deleted, reset,
+        )
+    logger.info("Phase 1 done | registered {} remaster batches with wiki_batch_size={}", count, settings.wiki_batch_size)
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +685,7 @@ def _remaster_pass1(
 
 
 def _remaster_pass2(
+    batch_id: int,
     batch_text: str,
     chapter_start: int,
     chapter_end: int,
@@ -512,14 +694,33 @@ def _remaster_pass2(
 ) -> tuple[ExtractionResult, list[dict]]:
     """Run Pass 2: extract character deltas + artifact updates for this batch."""
     context_str = _build_character_context(candidate_chars)
+    batch_excerpt = _build_balanced_batch_excerpt(
+        batch_text=batch_text,
+        chapter_start=chapter_start,
+        chapter_end=chapter_end,
+        max_chars=12000,
+    )
+    
+    # Log context being sent to LLM for inspection
+    logger.debug(
+        "Pass 2 context | batch={}-{} | chars={} | {}...",
+        chapter_start, chapter_end, len(candidate_chars),
+        context_str[:200] if context_str else "(empty)"
+    )
+    
     prompt = _REMASTER_PASS2_TMPL.format(
         start=chapter_start,
         end=chapter_end,
-        text=batch_text[:12000],
+        text=batch_excerpt,
         character_context=context_str,
         artifact_context=artifact_context,
     )
+    
+    # Save full request to file for inspection
+    _save_llm_request(batch_id, chapter_start, chapter_end, prompt, _REMASTER_PASS2_SYSTEM)
+    
     raw = _ollama_generate(prompt, _REMASTER_PASS2_SYSTEM, settings.wiki_extract_model)
+    _save_llm_response(batch_id, chapter_start, chapter_end, raw)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -613,7 +814,7 @@ def phase3_extraction_loop(db: SQLiteDB, dry_run: bool = False) -> None:
     logger.info("=== Phase 3: Remaster extraction loop ===")
 
     all_characters_fn = db.get_all_characters
-    chars_by_names_fn = db.get_characters_by_names
+    all_artifacts_fn = db.get_all_artifacts
 
     pending = db.get_remaster_pending_batches()
     total = db.count_remaster_total()
@@ -646,32 +847,33 @@ def phase3_extraction_loop(db: SQLiteDB, dry_run: bool = False) -> None:
             merged += 1
             continue
 
-        # Build character context with before_chapter cutoff
-        def _get_snap(cid: str) -> Optional[dict]:
-            return db.get_latest_snapshot(cid, before_chapter=chapter_start)
-
-        artifact_ctx = _build_artifact_context(db, chapter_start)
-
         try:
-            # [Phase 4 inline] Pass 1 — optional name scan
             all_chars = all_characters_fn()
-            if len(all_chars) < settings.wiki_context_threshold:
-                candidate_chars = all_chars
-            else:
-                name_entries = _remaster_pass1(batch_text, chapter_start, chapter_end)
-                if not name_entries:
-                    candidate_chars = all_chars
-                else:
-                    names_norm = [_normalize(e.name) for e in name_entries] + [
-                        _normalize(a) for e in name_entries for a in e.aliases
-                    ]
-                    candidate_chars = chars_by_names_fn(names_norm)
+            all_artifacts = all_artifacts_fn()
+            candidate_chars = _select_candidate_characters(batch_text, all_chars)
+            candidate_artifacts = _select_candidate_artifacts(batch_text, all_artifacts)
+            candidate_artifacts = _filter_artifacts_against_character_names(
+                candidate_artifacts,
+                candidate_chars,
+            )
+            artifact_ctx = _build_artifact_context(candidate_artifacts)
 
-            for char in candidate_chars:
-                char["_latest_snapshot"] = _get_snap(char["character_id"])
+            logger.debug(
+                "Candidate chars | batch={}-{} | ids={}",
+                chapter_start,
+                chapter_end,
+                [c["character_id"] for c in candidate_chars],
+            )
+            logger.debug(
+                "Candidate artifacts | batch={}-{} | ids={}",
+                chapter_start,
+                chapter_end,
+                [a["artifact_id"] for a in candidate_artifacts],
+            )
 
             # [Phase 4 inline] Pass 2 — extract deltas + artifacts
             extraction_result, artifact_updates = _remaster_pass2(
+                batch_id,
                 batch_text, chapter_start, chapter_end, candidate_chars, artifact_ctx
             )
             consecutive_fail = 0

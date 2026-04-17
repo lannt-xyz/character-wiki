@@ -232,8 +232,30 @@ class SQLiteDB:
         traits: list[str],
         visual_anchor: Optional[str],
     ) -> None:
-        """Insert or update identity fields only. Never touches temporal data."""
+        """Insert or update identity fields only. Never touches temporal data.
+        
+        Handles name_normalized UNIQUE collisions by reusing the existing row's character_id
+        if a different character_id tries to insert the same normalized name.
+        """
         now = _dt(_now())
+        
+        # Check if name_normalized already exists (exact match only, no fallback)
+        existing = self._conn.execute(
+            "SELECT character_id FROM wiki_characters WHERE name_normalized=?",
+            (name_normalized,),
+        ).fetchone()
+        
+        if existing and existing[0] != character_id:
+            # Different character_id exists with same name_normalized
+            # Reuse the existing character_id to avoid UNIQUE constraint violation
+            logger.debug(
+                "upsert_character | name_normalized collision | "
+                "existing_id={} new_id={} name_norm={}",
+                existing[0], character_id, name_normalized,
+            )
+            character_id = existing[0]
+        
+        # Now upsert with final character_id (may be reused or new)
         self._conn.execute(
             """
             INSERT INTO wiki_characters
@@ -760,6 +782,60 @@ class SQLiteDB:
             "SELECT COUNT(*) FROM wiki_remaster_batches"
         ).fetchone()
         return row[0] if row else 0
+
+    def reset_remaster_v2(self) -> tuple[int, int]:
+        """Delete all v2 snapshots and reset all remaster batches to PENDING.
+
+        Call this before starting a fresh Phase 3 run to prevent stale data
+        from crashed runs from leaking into character context.
+        Returns (deleted_snapshots, reset_batches).
+        """
+        deleted_char = self._conn.execute(
+            "DELETE FROM wiki_snapshots WHERE extraction_version=2"
+        ).rowcount
+        deleted_art = self._conn.execute(
+            "DELETE FROM wiki_artifact_snapshots WHERE extraction_version=2"
+        ).rowcount
+        reset = self._conn.execute(
+            "UPDATE wiki_remaster_batches SET status='PENDING', extracted_at=NULL, merged_at=NULL"
+        ).rowcount
+        self._conn.commit()
+        deleted = deleted_char + deleted_art
+        logger.info(
+            "reset_remaster_v2 | deleted {} char v2 snapshots, {} artifact v2 snapshots, reset {} batches",
+            deleted_char,
+            deleted_art,
+            reset,
+        )
+        return deleted, reset
+
+    def rebuild_remaster_batches(self, batch_size: int) -> int:
+        """Rebuild wiki_remaster_batches with a different chapter window size.
+
+        Useful for Phase 3 remaster with larger windows than original wiki_batch_size.
+        Returns count of rebuilt batches.
+        """
+        from config.settings import settings
+        
+        total_chapters = settings.total_chapters
+        
+        # Clear existing
+        self._conn.execute("DELETE FROM wiki_remaster_batches")
+        
+        # Create new batches with specified size
+        batch_id = 1
+        for ch_start in range(1, total_chapters + 1, batch_size):
+            ch_end = min(ch_start + batch_size - 1, total_chapters)
+            self._conn.execute(
+                "INSERT INTO wiki_remaster_batches (batch_id, chapter_start, chapter_end) VALUES (?, ?, ?)",
+                (batch_id, ch_start, ch_end),
+            )
+            batch_id += 1
+        
+        self._conn.commit()
+        count = self._conn.execute("SELECT COUNT(*) FROM wiki_remaster_batches").fetchone()[0]
+        logger.info("rebuild_remaster_batches | batch_size={} chapters | {} total batches", batch_size, count)
+        return count
 
     def get_remaster_pending_batches(self) -> list[dict]:
         rows = self._conn.execute(

@@ -20,7 +20,7 @@ crawler_max_retries: 5
 crawler_delay_sec: 1.0
 
 # Wiki extraction
-wiki_batch_size: 5
+wiki_batch_size: 10
 wiki_extract_model: "gemma4-32k:latest"
 wiki_context_threshold: 50
 wiki_max_consecutive_fail: 5

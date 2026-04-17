@@ -89,11 +89,15 @@ def merge_extraction_result(
 
         # Reuse existing character_id if name_normalized already exists
         # (LLM may return different id variants for the same name)
-        _existing = db.get_character_by_name(name_norm, include_deleted=True)
+        # Priority: non-deleted > deleted (avoid unique constraint on name_normalized)
+        _existing = db.get_character_by_name(name_norm, include_deleted=False)
+        if not _existing:
+            _existing = db.get_character_by_name(name_norm, include_deleted=True)
+        
         if _existing and _existing["character_id"] != character_id:
             logger.debug(
-                "Reusing existing character_id | old={} new={} name_norm={}",
-                _existing["character_id"], character_id, name_norm,
+                "Reusing existing character_id | old={} new={} name_norm={} is_deleted={}",
+                _existing["character_id"], character_id, name_norm, _existing.get("is_deleted", 0),
             )
             character_id = _existing["character_id"]
 

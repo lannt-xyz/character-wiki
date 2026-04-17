@@ -177,17 +177,29 @@ def _pass1_name_scan(batch_text: str, chapter_start: int, chapter_end: int) -> l
 # ---------------------------------------------------------------------------
 
 def _build_character_context(characters: list[dict]) -> str:
-    """Build compact context JSON for Pass 2 prompt."""
-    compact = []
+    """Build markdown context for Pass 2 prompt."""
+    if not characters:
+        return "- Không có nhân vật context"
+
+    lines: list[str] = []
     for char in characters:
-        compact.append({
-            "character_id": char["character_id"],
-            "name": char["name"],
-            "aliases": json.loads(char.get("aliases_json", "[]")),
-            "visual_anchor": char.get("visual_anchor"),
-            "latest_snapshot": char.get("_latest_snapshot"),
-        })
-    return json.dumps(compact, ensure_ascii=False, indent=None)
+        aliases_raw = char.get("aliases_json", "[]")
+        if isinstance(aliases_raw, str):
+            try:
+                aliases = json.loads(aliases_raw)
+            except Exception:
+                aliases = []
+        else:
+            aliases = aliases_raw or []
+
+        lines.append(f"### {char['name']} [{char['character_id']}]")
+        if aliases:
+            lines.append(f"- Aliases: {', '.join(aliases)}")
+        if char.get("visual_anchor"):
+            lines.append(f"- Visual anchor: {char['visual_anchor']}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
 
 
 def _pass2_delta_extract(
