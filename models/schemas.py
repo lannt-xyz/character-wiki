@@ -144,3 +144,30 @@ class ArtifactSeedEntry(BaseModel):
 class WikiSeedCharacter(BaseModel):
     character_id: str
     artifacts: list[ArtifactSeedEntry] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Per-character salient-span extraction schemas (Phase 3 v2)
+# ---------------------------------------------------------------------------
+
+
+class CharBatchSnapshot(BaseModel):
+    """A single snapshot produced by the per-character LLM pass."""
+
+    chapter_start: int
+    is_active: bool = True
+    level: Optional[str] = None
+    outfit: Optional[str] = None
+    weapon: Optional[str] = None
+    vfx_vibes: Optional[str] = None
+    physical_description: Optional[str] = None
+    visual_importance: int = Field(default=5, ge=1, le=10)
+
+
+class CharPassResult(BaseModel):
+    """Full output from one per-character LLM call (one segment)."""
+
+    character_id: str
+    snapshots: list[CharBatchSnapshot] = Field(default_factory=list)
+    artifact_updates: list[dict] = Field(default_factory=list)
+    new_aliases: list[str] = Field(default_factory=list)

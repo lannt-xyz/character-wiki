@@ -25,3 +25,9 @@ wiki_extract_model: "gemma4-32k:latest"
 wiki_context_threshold: 50
 wiki_max_consecutive_fail: 5
 wiki_snapshot_min_change: 1
+
+# Per-character salient-span extraction (wiki_remaster Phase 1 & 3)
+char_segment_size: 20       # chapters per char batch
+char_gap_threshold: 50      # chapter gap before splitting a new segment
+char_span_budget: 20000     # max chars of extracted spans sent to LLM
+char_top_limit: 50          # only process top N chars by v1 visual_importance (0 = all)

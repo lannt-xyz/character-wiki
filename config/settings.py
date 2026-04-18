@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     wiki_max_consecutive_fail: int = 5
     wiki_snapshot_min_change: int = 1
 
+    # Per-character salient-span extraction (wiki_remaster Phase 1 & 3)
+    char_segment_size: int = 20
+    char_gap_threshold: int = 50
+    char_span_budget: int = 20000
+    char_top_limit: int = 50  # 0 = all active chars
+
     @field_validator("total_chapters")
     @classmethod
     def total_chapters_positive(cls, v: int) -> int:

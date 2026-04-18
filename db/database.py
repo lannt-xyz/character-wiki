@@ -132,6 +132,30 @@ class SQLiteDB:
 
             CREATE INDEX IF NOT EXISTS idx_art_snap_ch
                 ON wiki_artifact_snapshots(artifact_id, chapter_start DESC);
+
+            CREATE TABLE IF NOT EXISTS wiki_mention_index (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_id TEXT NOT NULL,
+                chapter_num  INTEGER NOT NULL,
+                UNIQUE(character_id, chapter_num)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mention_char
+                ON wiki_mention_index(character_id);
+
+            CREATE TABLE IF NOT EXISTS wiki_char_batches (
+                batch_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_id     TEXT NOT NULL,
+                segment_start    INTEGER NOT NULL,
+                segment_end      INTEGER NOT NULL,
+                remaster_version INTEGER NOT NULL DEFAULT 2,
+                status           TEXT NOT NULL DEFAULT 'PENDING',
+                extracted_at     TEXT,
+                merged_at        TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_char_batches_status
+                ON wiki_char_batches(status);
         """)
         self._conn.commit()
 
@@ -784,10 +808,9 @@ class SQLiteDB:
         return row[0] if row else 0
 
     def reset_remaster_v2(self) -> tuple[int, int]:
-        """Delete all v2 snapshots and reset all remaster batches to PENDING.
+        """Delete all v2 snapshots, clear mention index + char batches, reset remaster batches.
 
-        Call this before starting a fresh Phase 3 run to prevent stale data
-        from crashed runs from leaking into character context.
+        Full-reset strategy: call before any fresh Phase 1 run.
         Returns (deleted_snapshots, reset_batches).
         """
         deleted_char = self._conn.execute(
@@ -799,13 +822,14 @@ class SQLiteDB:
         reset = self._conn.execute(
             "UPDATE wiki_remaster_batches SET status='PENDING', extracted_at=NULL, merged_at=NULL"
         ).rowcount
+        self._conn.execute("DELETE FROM wiki_mention_index")
+        self._conn.execute("DELETE FROM wiki_char_batches")
         self._conn.commit()
         deleted = deleted_char + deleted_art
         logger.info(
-            "reset_remaster_v2 | deleted {} char v2 snapshots, {} artifact v2 snapshots, reset {} batches",
-            deleted_char,
-            deleted_art,
-            reset,
+            "reset_remaster_v2 | deleted {} char v2 snapshots, {} artifact v2 snapshots, "
+            "reset {} remaster batches, cleared mention_index + char_batches",
+            deleted_char, deleted_art, reset,
         )
         return deleted, reset
 
@@ -987,6 +1011,153 @@ class SQLiteDB:
             "SELECT weapon FROM wiki_snapshots WHERE weapon IS NOT NULL AND weapon != '' AND extraction_version=1"
         ).fetchall()
         return [row[0] for row in rows]
+
+    # ------------------------------------------------------------------
+    # get_all_active_characters / get_character / get_all_chapter_contents
+    # ------------------------------------------------------------------
+
+    def get_all_active_characters(self) -> list[dict]:
+        """Return all non-deleted characters (no limit)."""
+        rows = self._conn.execute(
+            "SELECT * FROM wiki_characters WHERE is_deleted=0 ORDER BY character_id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_top_chars_by_v1_importance(self, limit: int) -> list[dict]:
+        """Return top N active chars ranked by max v1 visual_importance desc.
+
+        Falls back to ALL active chars when limit <= 0.
+        Characters with no v1 snapshots are ranked last (importance=0).
+        """
+        if limit <= 0:
+            return self.get_all_active_characters()
+        rows = self._conn.execute(
+            """
+            SELECT c.*, COALESCE(MAX(s.visual_importance), 0) AS max_v1_importance
+            FROM wiki_characters c
+            LEFT JOIN wiki_snapshots s
+                ON s.character_id = c.character_id AND s.extraction_version = 1
+            WHERE c.is_deleted = 0
+            GROUP BY c.character_id
+            ORDER BY max_v1_importance DESC, c.character_id ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_character(self, character_id: str) -> Optional[dict]:
+        """Return a single active character row by id, or None."""
+        return self.get_character_by_id(character_id, include_deleted=False)
+
+    def get_all_chapter_contents(self) -> list[tuple[int, str]]:
+        """Return all (chapter_num, content) pairs where content is not NULL."""
+        rows = self._conn.execute(
+            "SELECT chapter_num, content FROM chapters WHERE content IS NOT NULL AND content != ''"
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def get_all_chars_ordered_for_synthesis(self) -> list[dict]:
+        """Return all active chars ordered by max v2 visual_importance desc (for Phase 4)."""
+        rows = self._conn.execute(
+            """
+            SELECT c.*, COALESCE(MAX(s.visual_importance), 0) AS max_v2_importance
+            FROM wiki_characters c
+            LEFT JOIN wiki_snapshots s
+                ON s.character_id = c.character_id AND s.extraction_version = 2
+            WHERE c.is_deleted = 0
+            GROUP BY c.character_id
+            ORDER BY max_v2_importance DESC, c.character_id ASC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # wiki_mention_index table
+    # ------------------------------------------------------------------
+
+    def build_mention_index(self, character_id: str, chapter_nums: list[int]) -> None:
+        """Bulk-insert mention rows for one character (INSERT OR IGNORE)."""
+        if not chapter_nums:
+            return
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO wiki_mention_index (character_id, chapter_num) VALUES (?, ?)",
+            [(character_id, num) for num in chapter_nums],
+        )
+        self._conn.commit()
+
+    def get_mention_chapters(self, character_id: str) -> list[int]:
+        """Return sorted chapter numbers where character is mentioned."""
+        rows = self._conn.execute(
+            "SELECT chapter_num FROM wiki_mention_index WHERE character_id=? ORDER BY chapter_num ASC",
+            (character_id,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def clear_mention_index(self) -> None:
+        """Delete all rows from wiki_mention_index."""
+        self._conn.execute("DELETE FROM wiki_mention_index")
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # wiki_char_batches table
+    # ------------------------------------------------------------------
+
+    def build_char_batches(self, batches: list[dict]) -> None:
+        """Bulk-insert char batch rows. Each dict must have character_id, segment_start, segment_end."""
+        if not batches:
+            return
+        self._conn.executemany(
+            """
+            INSERT INTO wiki_char_batches (character_id, segment_start, segment_end)
+            VALUES (?, ?, ?)
+            """,
+            [(b["character_id"], b["segment_start"], b["segment_end"]) for b in batches],
+        )
+        self._conn.commit()
+
+    def clear_char_batches(self) -> None:
+        """Delete all rows from wiki_char_batches."""
+        self._conn.execute("DELETE FROM wiki_char_batches")
+        self._conn.commit()
+
+    def get_pending_char_batches(self) -> list[dict]:
+        """Return all char batches not yet MERGED, ordered by batch_id."""
+        rows = self._conn.execute(
+            "SELECT * FROM wiki_char_batches WHERE status != 'MERGED' ORDER BY batch_id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_char_batch_status(self, batch_id: int, status: str) -> None:
+        now = _dt(_now())
+        if status == "EXTRACTED":
+            self._conn.execute(
+                "UPDATE wiki_char_batches SET status=?, extracted_at=? WHERE batch_id=?",
+                (status, now, batch_id),
+            )
+        elif status == "MERGED":
+            self._conn.execute(
+                "UPDATE wiki_char_batches SET status=?, merged_at=? WHERE batch_id=?",
+                (status, now, batch_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE wiki_char_batches SET status=? WHERE batch_id=?",
+                (status, batch_id),
+            )
+        self._conn.commit()
+
+    def count_char_batches_merged(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM wiki_char_batches WHERE status='MERGED'"
+        ).fetchone()
+        return row[0] if row else 0
+
+    def count_char_batches_total(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM wiki_char_batches"
+        ).fetchone()
+        return row[0] if row else 0
 
 
 # ---------------------------------------------------------------------------

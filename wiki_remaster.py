@@ -22,6 +22,7 @@ import json
 import re
 import shutil
 import sys
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,8 @@ from config.settings import settings
 from crawler.storage import load_chapter_content
 from db.database import SQLiteDB
 from models.schemas import (
+    CharBatchSnapshot,
+    CharPassResult,
     CharacterPatch,
     ExtractionResult,
     NameEntry,
@@ -54,6 +57,7 @@ _PROJECT_ROOT = Path(__file__).parent
 _RERUN_DIR = _PROJECT_ROOT / settings.data_dir / "rerun"
 _CHAR_INPUT_DIR = _RERUN_DIR / "character_input"
 _LLM_REQUEST_DIR = _PROJECT_ROOT / settings.data_dir / "llm_requests"
+_TRACE_DIR = _RERUN_DIR / "trace"
 _DB_PATH = _PROJECT_ROOT / settings.db_path
 
 
@@ -177,6 +181,68 @@ Quy tắc:
 - Không nhắc đến nhân vật/pháp khí không xuất hiện trong đoạn này"""
 
 
+_REMASTER_CHAR_PASS_SYSTEM = (
+    "Bạn là trợ lý wiki nhân vật. Nhiệm vụ: từ các đoạn truyện được cung cấp, "
+    "trích xuất sự thay đổi trạng thái của MỘT nhân vật duy nhất theo từng mốc chương. "
+    "Chỉ trả JSON theo schema quy định, không giải thích, không markdown."
+)
+
+_REMASTER_CHAR_PASS_TMPL = """\
+Nhân vật focus: {name} [{character_id}]
+
+Context seed (thông tin đã biết về nhân vật):
+---
+{seed_context}
+---
+
+Pháp khí liên quan:
+{artifact_context}
+
+Đoạn truyện (chỉ chứa các đoạn nhắc đến nhân vật này):
+---
+{spans_text}
+---
+
+Trả về JSON với cấu trúc:
+{{
+  "character_id": "{character_id}",
+  "snapshots": [
+    {{
+      "chapter_start": <số chương đầu của mốc thay đổi>,
+      "is_active": true,
+      "level": "<cảnh giới hoặc null>",
+      "outfit": "<trang phục hoặc null>",
+      "weapon": "<vũ khí hoặc null>",
+      "vfx_vibes": "<hiệu ứng hình ảnh hoặc null>",
+      "physical_description": "<trạng thái thể chất tạm thời hoặc null>",
+      "visual_importance": <1-10>
+    }}
+  ],
+  "artifact_updates": [
+    {{
+      "artifact_id": "<id pháp khí — slug không dấu>",
+      "name": "<tên đầy đủ>",
+      "material": "<chất liệu chính — null nếu không biết>",
+      "visual_anchor": "<mô tả ngoại hình tiếng Anh đủ để render 3D — null nếu chưa rõ>",
+      "rarity": "<mức độ quý hiếm — null nếu không biết>",
+      "owner_id": "{character_id}",
+      "normal_state": "<trạng thái bình thường — null nếu không biết>",
+      "active_state": "<khi phát huy sức mạnh — null nếu không biết>",
+      "condition": "intact|active|damaged|evolved",
+      "vfx_color": "<màu hiệu ứng chủ đạo — null nếu không biết>"
+    }}
+  ],
+  "new_aliases": ["<alias mới phát hiện trong đoạn này, nếu có>"]
+}}
+
+Quy tắc:
+- snapshots: mỗi entry = 1 mốc chương có thay đổi đáng kể về trạng thái nhân vật
+- Chỉ ghi fields thực sự thay đổi, null nếu không đổi
+- artifact_updates: chỉ pháp khí của nhân vật focus này
+- Nếu không có thay đổi nào, trả về snapshots=[], artifact_updates=[], new_aliases=[]
+"""
+
+
 def _save_llm_request(batch_num: int, chapter_start: int, chapter_end: int, prompt: str, system: str) -> None:
     """Save full LLM request as markdown for inspection."""
     _LLM_REQUEST_DIR.mkdir(parents=True, exist_ok=True)
@@ -233,6 +299,48 @@ def _clear_llm_trace_dir() -> None:
             removed += 1
     if removed:
         logger.info("Cleared {} old LLM trace files from {}", removed, _LLM_REQUEST_DIR)
+    # Also clear per-character trace dir
+    if _TRACE_DIR.exists():
+        shutil.rmtree(_TRACE_DIR)
+        logger.info("Cleared trace dir {}", _TRACE_DIR)
+
+
+def _save_char_llm_request(
+    character_id: str, batch_id: int, segment_start: int, segment_end: int,
+    prompt: str, system: str
+) -> None:
+    """Save per-character LLM request to data/rerun/trace/{character_id}/."""
+    trace_dir = _TRACE_DIR / character_id
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    filepath = trace_dir / f"batch{batch_id:05d}_ch{segment_start}-{segment_end}_request.md"
+    content = (
+        f"# CharPass LLM Request\n\n"
+        f"- batch_id: {batch_id}\n"
+        f"- character_id: {character_id}\n"
+        f"- chapters: {segment_start}-{segment_end}\n"
+        f"- timestamp: {datetime.now().isoformat()}\n\n"
+        f"## System\n\n{system}\n\n"
+        f"## User\n\n{prompt}\n"
+    )
+    filepath.write_text(content, encoding="utf-8")
+    logger.debug("Saved char request to {}", filepath)
+
+
+def _save_char_llm_response(
+    character_id: str, batch_id: int, segment_start: int, segment_end: int, raw: str
+) -> None:
+    """Save per-character LLM response to data/rerun/trace/{character_id}/."""
+    trace_dir = _TRACE_DIR / character_id
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    filepath = trace_dir / f"batch{batch_id:05d}_ch{segment_start}-{segment_end}_response.json"
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        payload = {"_parse_error": str(exc), "_raw": raw}
+    filepath.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    logger.debug("Saved char response to {}", filepath)
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +546,194 @@ def _seed_artifact_stubs(db: SQLiteDB, artifact_names: list[str], dry_run: bool 
     logger.info("_seed_artifact_stubs | {} stub records upserted", seeded)
 
 
+# ---------------------------------------------------------------------------
+# Per-character helpers (Phase 1 & Phase 3)
+# ---------------------------------------------------------------------------
+
+def _build_mention_index(db: SQLiteDB, all_chars: list[dict]) -> None:
+    """Build wiki_mention_index for all characters.
+
+    Strategy: pre-load + pre-normalize all chapters once (17MB RAM),
+    then scan 600 chars against the normalized texts — avoids 2.1M DB round-trips.
+    """
+    chapter_pairs = db.get_all_chapter_contents()
+    # {chapter_num: " <normalized text> "} — outer spaces for whole-word match
+    chapter_norm: dict[int, str] = {
+        num: f" {_normalize(text)} " for num, text in chapter_pairs if text
+    }
+    total = len(all_chars)
+    logger.info(
+        "_build_mention_index | {} chapters loaded | scanning {} chars...",
+        len(chapter_norm), total,
+    )
+
+    for i, char in enumerate(all_chars, 1):
+        cid = char["character_id"]
+        aliases_raw = char.get("aliases_json") or "[]"
+        try:
+            aliases = json.loads(aliases_raw) if isinstance(aliases_raw, str) else (aliases_raw or [])
+        except Exception:
+            aliases = []
+
+        # Build normalized needle list (same logic as _text_has_phrase)
+        phrases = [char.get("name"), *aliases]
+        needles: list[str] = []
+        for phrase in phrases:
+            if not phrase:
+                continue
+            n = _normalize(phrase)
+            if n and not (" " not in n and len(n) < 5):
+                needles.append(f" {n} ")
+
+        if not needles:
+            continue
+
+        chapter_nums = [
+            num for num, norm_text in chapter_norm.items()
+            if any(needle in norm_text for needle in needles)
+        ]
+        if chapter_nums:
+            db.build_mention_index(cid, chapter_nums)
+
+        if i % 50 == 0:
+            logger.info("_build_mention_index | {}/{} chars done", i, total)
+
+    logger.info("_build_mention_index | done | {} chars processed", total)
+
+
+def _group_char_segments(
+    chapter_nums: list[int], segment_size: int, gap_threshold: int
+) -> list[tuple[int, int]]:
+    """Group mention chapter numbers into (segment_start, segment_end) tuples.
+
+    Step 1: Split into independent groups when consecutive gap > gap_threshold.
+    Step 2: Within each group, create windows of segment_size chapter range.
+    The (start, end) are actual chapter numbers used in DB range queries.
+    """
+    if not chapter_nums:
+        return []
+    sorted_nums = sorted(set(chapter_nums))
+
+    # Step 1: split by gap
+    groups: list[list[int]] = []
+    current: list[int] = [sorted_nums[0]]
+    for num in sorted_nums[1:]:
+        if num - current[-1] > gap_threshold:
+            groups.append(current)
+            current = [num]
+        else:
+            current.append(num)
+    groups.append(current)
+
+    # Step 2: split each group into segment_size chapter-range windows
+    segments: list[tuple[int, int]] = []
+    for group in groups:
+        window_start = group[0]
+        while True:
+            window_end = window_start + segment_size - 1
+            in_window = [n for n in group if window_start <= n <= window_end]
+            if not in_window:
+                break
+            segments.append((in_window[0], in_window[-1]))
+            remaining = [n for n in group if n > window_end]
+            if not remaining:
+                break
+            window_start = remaining[0]
+
+    return segments
+
+
+def _load_chapters_by_range(db: SQLiteDB, start: int, end: int) -> dict[int, str]:
+    """Return {chapter_num: content} for chapters in [start, end]."""
+    rows = db._conn.execute(
+        "SELECT chapter_num, content FROM chapters WHERE chapter_num BETWEEN ? AND ? AND content IS NOT NULL",
+        (start, end),
+    ).fetchall()
+    return {row[0]: row[1] for row in rows if row[1]}
+
+
+def _load_character_seed_context(character_id: str, char_row: dict, db: SQLiteDB) -> str:
+    """Return seed context markdown for the character.
+
+    Priority: data/rerun/character_input/{id}.md → fallback to built from v1 snapshots.
+    """
+    seed_file = _CHAR_INPUT_DIR / f"{character_id}.md"
+    if seed_file.exists():
+        return seed_file.read_text(encoding="utf-8")
+
+    # Fallback: build from v1 snapshots in DB
+    snapshots_v1 = [
+        s for s in db.get_all_snapshots(character_id)
+        if s.get("extraction_version", 1) == 1
+    ]
+    return _build_character_markdown(char_row, snapshots_v1, db=db)
+
+
+def _extract_character_spans(
+    chapter_texts: dict[int, str],
+    character_id: str,
+    char_row: dict,
+    budget: Optional[int] = None,
+) -> str:
+    """Extract paragraphs mentioning the character from chapter texts.
+
+    Includes the paragraph immediately before each matching paragraph
+    (context window — author often describes appearance before naming the char).
+    Returns empty string if no paragraphs match.
+    """
+    if budget is None:
+        budget = settings.char_span_budget
+
+    aliases_raw = char_row.get("aliases_json") or "[]"
+    try:
+        aliases = json.loads(aliases_raw) if isinstance(aliases_raw, str) else (aliases_raw or [])
+    except Exception:
+        aliases = []
+
+    phrases = [char_row.get("name"), *aliases]
+    valid_phrases = [p for p in phrases if p and _normalize(p) and not (
+        " " not in _normalize(p) and len(_normalize(p)) < 5
+    )]
+
+    if not valid_phrases:
+        return ""
+
+    total_chars = 0
+    result_parts: list[str] = []
+
+    for chap_num in sorted(chapter_texts.keys()):
+        text = chapter_texts.get(chap_num) or ""
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        selected: list[str] = []
+
+        for idx, para in enumerate(paragraphs):
+            if any(_text_has_phrase(para, phrase) for phrase in valid_phrases):
+                # Context window: include predecessor paragraph if present and not already added
+                if idx > 0:
+                    prev = paragraphs[idx - 1]
+                    if not selected or selected[-1] != prev:
+                        selected.append(prev)
+                if not selected or selected[-1] != para:
+                    selected.append(para)
+
+        if not selected:
+            continue
+
+        chapter_block = f"--- Chương {chap_num} ---\n" + "\n\n".join(selected)
+        block_len = len(chapter_block)
+
+        if total_chars + block_len > budget:
+            remaining = budget - total_chars
+            if remaining > 100:
+                result_parts.append(chapter_block[:remaining])
+            break
+
+        result_parts.append(chapter_block)
+        total_chars += block_len
+
+    return "\n\n".join(result_parts)
+
+
 def _deduplicate_characters_phase2(db: SQLiteDB, dry_run: bool = False) -> int:
     """Merge duplicate character rows by canonicalized display name.
 
@@ -587,30 +883,59 @@ def phase0_backup(dry_run: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 — Init wiki_remaster_batches
+# Phase 1 — Init mention index + char batches
 # ---------------------------------------------------------------------------
 
 def phase1_init_batches(db: SQLiteDB, dry_run: bool = False) -> None:
-    logger.info("=== Phase 1: Init wiki_remaster_batches ===")
-    if dry_run:
-        logger.info("dry_run: skip init_remaster_batches")
-        return
-    _clear_llm_trace_dir()
-    count = db.init_remaster_batches()
-    
-    # Rebuild with configured batch_size (may differ from original wiki_batches)
-    # This allows Phase 3 to use larger windows than the initial pipeline
-    count = db.rebuild_remaster_batches(settings.wiki_batch_size)
-    
-    # Always wipe v2 snapshots on a full restart (Phase 1) so stale data from
-    # crashed runs cannot leak into character context and cascade wrong levels.
-    deleted, reset = db.reset_remaster_v2()
+    """Full reset + rebuild mention index + char batches for all active characters."""
+    logger.info("=== Phase 1: Init mention index + char batches ===")
+
+    # Full reset: purge all v2 data, clear mention_index + char_batches
+    deleted, _ = db.reset_remaster_v2()
     if deleted:
-        logger.warning(
-            "Phase 1 | Purged {} stale v2 snapshots and reset {} batches to PENDING",
-            deleted, reset,
+        logger.warning("Phase 1 | Purged {} stale v2 data", deleted)
+
+    all_chars = db.get_top_chars_by_v1_importance(limit=settings.char_top_limit)
+    total_active = len(db.get_all_active_characters())
+    logger.info(
+        "Phase 1 | processing top {} / {} active chars (char_top_limit={})",
+        len(all_chars), total_active, settings.char_top_limit,
+    )
+
+    if dry_run:
+        logger.info("dry_run: skip mention index build and char_batches insert")
+        return
+
+    _clear_llm_trace_dir()
+
+    # Build mention index (pre-loads all chapters into RAM for efficiency)
+    _build_mention_index(db, all_chars)
+
+    # Group into char_batches by segment
+    batch_rows: list[dict] = []
+    for char in all_chars:
+        cid = char["character_id"]
+        chapter_nums = db.get_mention_chapters(cid)
+        if not chapter_nums:
+            continue
+        segments = _group_char_segments(
+            chapter_nums,
+            segment_size=settings.char_segment_size,
+            gap_threshold=settings.char_gap_threshold,
         )
-    logger.info("Phase 1 done | registered {} remaster batches with wiki_batch_size={}", count, settings.wiki_batch_size)
+        for seg_start, seg_end in segments:
+            batch_rows.append({
+                "character_id": cid,
+                "segment_start": seg_start,
+                "segment_end": seg_end,
+            })
+
+    db.build_char_batches(batch_rows)
+    total_batches = db.count_char_batches_total()
+    logger.info(
+        "Phase 1 done | {} chars | {} char_batches",
+        len(all_chars), total_batches,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +986,96 @@ def phase2_build_input(db: SQLiteDB, dry_run: bool = False) -> list[dict]:
         len(top_chars), len(artifact_names),
     )
     return top_chars
+
+
+# ---------------------------------------------------------------------------
+# Per-character LLM pass + merge (Phase 3 v2 core)
+# ---------------------------------------------------------------------------
+
+def _remaster_char_pass(
+    batch_id: int,
+    character_id: str,
+    segment_start: int,
+    segment_end: int,
+    char_context: str,
+    artifact_context: str,
+    spans_text: str,
+    char_name: str,
+) -> CharPassResult:
+    """Call LLM for one character × one segment. Returns validated CharPassResult."""
+    prompt = _REMASTER_CHAR_PASS_TMPL.format(
+        name=char_name,
+        character_id=character_id,
+        seed_context=char_context,
+        artifact_context=artifact_context,
+        spans_text=spans_text,
+    )
+    _save_char_llm_request(character_id, batch_id, segment_start, segment_end, prompt, _REMASTER_CHAR_PASS_SYSTEM)
+    raw = _ollama_generate(prompt, _REMASTER_CHAR_PASS_SYSTEM, settings.wiki_extract_model)
+    _save_char_llm_response(character_id, batch_id, segment_start, segment_end, raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"CharPass JSON parse failed | char={character_id} batch={batch_id} | {exc}"
+        ) from exc
+    # Ensure character_id is correct even if LLM returns wrong value
+    data["character_id"] = character_id
+    return CharPassResult.model_validate(data)
+
+
+def _merge_char_pass_result(
+    result: CharPassResult,
+    char_row: dict,
+    db: SQLiteDB,
+) -> int:
+    """Merge CharPassResult into DB. Returns number of snapshots written."""
+    character_id = result.character_id
+    written = 0
+
+    for snap in result.snapshots:
+        if db.snapshot_exists(character_id, snap.chapter_start, extraction_version=2):
+            continue
+        db.add_snapshot(
+            character_id=character_id,
+            chapter_start=snap.chapter_start,
+            is_active=snap.is_active,
+            level=snap.level,
+            outfit=snap.outfit,
+            weapon=snap.weapon,
+            vfx_vibes=snap.vfx_vibes,
+            physical_description=snap.physical_description,
+            visual_importance=snap.visual_importance,
+            extraction_version=2,
+        )
+        written += 1
+
+    # Dedup-append new_aliases
+    if result.new_aliases:
+        existing_raw = char_row.get("aliases_json") or "[]"
+        try:
+            existing_aliases: list[str] = json.loads(existing_raw) if isinstance(existing_raw, str) else []
+        except Exception:
+            existing_aliases = []
+        existing_normalized = {_normalize(a) for a in existing_aliases}
+        truly_new: list[str] = []
+        for alias in result.new_aliases:
+            norm = _normalize(alias)
+            if norm and norm not in existing_normalized:
+                truly_new.append(alias)
+                logger.warning(
+                    "New alias discovered | char={} alias={} — may need index rebuild",
+                    character_id, alias,
+                )
+        if truly_new:
+            db.merge_aliases(character_id, truly_new)
+
+    # Artifact updates (use first snapshot chapter_start, or segment's start)
+    if result.artifact_updates:
+        chapter_ref = result.snapshots[0].chapter_start if result.snapshots else 0
+        _merge_artifact_updates(db, result.artifact_updates, chapter_ref)
+
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -803,14 +1218,9 @@ def _merge_artifact_updates(
     return written
 
 
-def phase3_extraction_loop(db: SQLiteDB, dry_run: bool = False) -> None:
-    """Main extraction loop — sequential through all pending remaster batches.
-
-    Inline phases:
-      4: LLM extract (Pass 1 name scan + Pass 2 delta extract with artifact context)
-      5: Merge character deltas → wiki_snapshots v2 (append-only)
-      6: Upsert artifact metadata + artifact snapshots
-    """
+def _phase3_legacy_loop(db: SQLiteDB, dry_run: bool = False) -> None:
+    # LEGACY — replaced by phase3_char_extraction_loop
+    """Original batch-by-chapter extraction loop. Kept for reference only."""
     logger.info("=== Phase 3: Remaster extraction loop ===")
 
     all_characters_fn = db.get_all_characters
@@ -926,25 +1336,163 @@ def phase3_extraction_loop(db: SQLiteDB, dry_run: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3 (v2) — Per-character extraction loop
+# ---------------------------------------------------------------------------
+
+def phase3_char_extraction_loop(
+    db: SQLiteDB, dry_run: bool = False, max_batches: Optional[int] = None
+) -> None:
+    """Per-character salient-span extraction loop.
+
+    Sequential — 1 LLM call per char_batch. Resume-safe: restarts from first PENDING batch.
+    Each call: load chapter texts → extract spans → LLM → merge v2 snapshots.
+    """
+    logger.info("=== Phase 3 (v2): Per-character extraction loop ===")
+
+    pending = db.get_pending_char_batches()
+    total = db.count_char_batches_total()
+    merged = db.count_char_batches_merged()
+
+    if not pending:
+        logger.info("Phase 3 | No pending char batches.")
+        return
+
+    logger.info("Phase 3 | {}/{} char batches pending", len(pending), total)
+    all_artifacts_fn = db.get_all_artifacts
+    consecutive_fail = 0
+    processed = 0
+
+    for batch in pending:
+        if max_batches is not None and processed >= max_batches:
+            logger.info("Phase 3 | Reached max_batches={}, stopping.", max_batches)
+            break
+
+        batch_id = batch["batch_id"]
+        character_id = batch["character_id"]
+        segment_start = batch["segment_start"]
+        segment_end = batch["segment_end"]
+        pct = (merged / total * 100) if total else 0
+
+        logger.info(
+            "[CharBatch {}/{}  | {:.1f}%] char={} ch={}-{}",
+            batch_id, total, pct, character_id, segment_start, segment_end,
+        )
+        _t_batch_start = time.monotonic()
+
+        # Fetch character row
+        char_row = db.get_character(character_id)
+        if not char_row:
+            logger.warning("CharBatch {} | character not found: {} — skip", batch_id, character_id)
+            if not dry_run:
+                db.set_char_batch_status(batch_id, "MERGED")
+            merged += 1
+            processed += 1
+            continue
+
+        # Load chapter texts for this segment
+        chapter_texts = _load_chapters_by_range(db, segment_start, segment_end)
+
+        # Extract salient spans for this character
+        spans_text = _extract_character_spans(chapter_texts, character_id, char_row)
+        if not spans_text:
+            logger.info(
+                "CharBatch {} | no spans for char={} ch={}-{} — skip LLM",
+                batch_id, character_id, segment_start, segment_end,
+            )
+            if not dry_run:
+                db.set_char_batch_status(batch_id, "MERGED")
+            merged += 1
+            processed += 1
+            continue
+
+        # Seed context
+        seed_context = _load_character_seed_context(character_id, char_row, db)
+
+        # Candidate artifacts from the combined segment text
+        combined_text = "\n".join(chapter_texts.values())
+        all_artifacts = all_artifacts_fn()
+        candidate_artifacts = _select_candidate_artifacts(combined_text, all_artifacts)
+        candidate_artifacts = _filter_artifacts_against_character_names(candidate_artifacts, [char_row])
+        artifact_ctx = _build_artifact_context(candidate_artifacts)
+
+        try:
+            _t_llm_start = time.monotonic()
+            result = _remaster_char_pass(
+                batch_id=batch_id,
+                character_id=character_id,
+                segment_start=segment_start,
+                segment_end=segment_end,
+                char_context=seed_context,
+                artifact_context=artifact_ctx,
+                spans_text=spans_text,
+                char_name=char_row.get("name", character_id),
+            )
+            _t_llm_end = time.monotonic()
+            logger.debug(
+                "LLM call done | char={} ch={}-{} | llm={:.1f}s",
+                character_id, segment_start, segment_end, _t_llm_end - _t_llm_start,
+            )
+            consecutive_fail = 0
+        except Exception as exc:
+            consecutive_fail += 1
+            logger.warning(
+                "CharBatch fail #{} | batch={} char={} error={}",
+                consecutive_fail, batch_id, character_id, exc,
+            )
+            if consecutive_fail > settings.wiki_max_consecutive_fail:
+                logger.error("Too many consecutive failures. Stopping.")
+                break
+            if not dry_run:
+                db.set_char_batch_status(batch_id, "MERGED")
+            merged += 1
+            processed += 1
+            continue
+
+        if not dry_run:
+            written = _merge_char_pass_result(result, char_row, db)
+            db.set_char_batch_status(batch_id, "MERGED")
+            merged += 1
+            _t_total = time.monotonic() - _t_batch_start
+            logger.info(
+                "[CharBatch {}/{}  | {:.1f}%] MERGED | char={} snaps={} | total={:.1f}s",
+                batch_id, total, (merged / total * 100), character_id, written, _t_total,
+            )
+        else:
+            _t_total = time.monotonic() - _t_batch_start
+            logger.info(
+                "[CharBatch {}] dry_run | char={} snaps={} art_upd={} | total={:.1f}s",
+                batch_id, character_id,
+                len(result.snapshots), len(result.artifact_updates), _t_total,
+            )
+
+        processed += 1
+
+    logger.info(
+        "Phase 3 done | merged={}/{} char batches",
+        db.count_char_batches_merged(), total,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase 4 — Final synthesis from v2 snapshots
 # ---------------------------------------------------------------------------
 
 def phase4_final_synthesis(db: SQLiteDB, dry_run: bool = False) -> None:
-    """Re-synthesize top-20 wiki_characters from v2 snapshots created by Phase 3.
+    """Re-synthesize all active wiki_characters from v2 snapshots.
 
-    Phase 3 ran batch-by-batch and updated wiki_characters with delta merges.
-    This phase does a single LLM call per character to consolidate v2 data into
-    a clean canonical identity — the final and most accurate wiki_characters update.
+    Processes chars ordered by max v2 visual_importance desc
+    (visual_importance >= 6 first so Video Pipeline has data ASAP).
+    Resume-safe: skips chars already at remaster_version=2.
     """
     logger.info("=== Phase 4: Final synthesis from v2 snapshots ===")
-    top_chars = db.get_top_characters_by_snapshot(limit=20)
-    if not top_chars:
+    all_chars = db.get_all_chars_ordered_for_synthesis()
+    if not all_chars:
         logger.warning("No characters found in DB.")
         return
 
     updated = 0
     skipped = 0
-    for char in top_chars:
+    for char in all_chars:
         cid = char["character_id"]
 
         # Resume guard: skip if already synthesized in this phase
@@ -999,7 +1547,7 @@ def phase4_final_synthesis(db: SQLiteDB, dry_run: bool = False) -> None:
 
     logger.info(
         "Phase 4 done | {}/{} synthesized | {} skipped (already done)",
-        updated, len(top_chars), skipped,
+        updated, len(all_chars), skipped,
     )
 
 
@@ -1033,9 +1581,9 @@ def main() -> None:
         epilog="""
 Phases:
   0  Backup DB (always safe to re-run)
-  1  Init wiki_remaster_batches (idempotent)
-  2  Build top-20 character markdown + seed artifact stubs from v1 data
-  3  Main extraction loop (batch-by-batch, sequential, resume-safe)
+  1  Init mention index + char batches for all active characters (full reset)
+  2  Build character markdown + seed artifact stubs from v1 data
+  3  Per-character extraction loop (sequential, resume-safe)
   4  Final synthesis — re-synthesize wiki_characters from v2 snapshots
         """,
     )
@@ -1051,19 +1599,47 @@ Phases:
         action="store_true",
         help="Skip all DB writes and file writes",
     )
+    parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Limit Phase 3 to N char batches (for testing)",
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print pipeline progress stats and exit",
+    )
     args = parser.parse_args()
     from_phase: int = args.from_phase
     dry_run: bool = args.dry_run
+    max_batches: Optional[int] = args.max_batches
+
+    db = SQLiteDB(settings.db_path)
+
+    if args.stats:
+        total = db.count_char_batches_total()
+        merged = db.count_char_batches_merged()
+        pct = (merged / total * 100) if total else 0.0
+        active_chars = len(db.get_all_active_characters())
+        print(
+            f"wiki_remaster stats\n"
+            f"  char_batches : {merged}/{total} merged ({pct:.1f}%)\n"
+            f"  active chars : {active_chars}\n"
+            f"  v2 snapshots : {db._scalar('SELECT COUNT(*) FROM wiki_snapshots WHERE extraction_version=2')}"
+        )
+        db.close()
+        return
 
     if from_phase < 0 or from_phase > 4:
         logger.error("--from-phase must be between 0 and 4 (got {})", from_phase)
+        db.close()
         sys.exit(1)
 
-    db = SQLiteDB(settings.db_path)
     logger.info(
-        "wiki_remaster starting | from_phase={} dry_run={}",
-        from_phase,
-        dry_run,
+        "wiki_remaster starting | from_phase={} dry_run={} max_batches={}",
+        from_phase, dry_run, max_batches,
     )
 
     try:
@@ -1071,7 +1647,7 @@ Phases:
         if from_phase <= 0:
             phase0_backup(dry_run)
 
-        # Phase 1: Init remaster batches
+        # Phase 1: Build mention index + char batches (full reset)
         if from_phase <= 1:
             phase1_init_batches(db, dry_run)
 
@@ -1079,9 +1655,9 @@ Phases:
         if from_phase <= 2:
             phase2_build_input(db, dry_run)
 
-        # Phase 3: Main extraction loop (phases 4/5/6 inline — sequential, resume-safe)
+        # Phase 3: Per-character extraction loop (sequential, resume-safe)
         if from_phase <= 3:
-            phase3_extraction_loop(db, dry_run)
+            phase3_char_extraction_loop(db, dry_run, max_batches=max_batches)
 
         # Phase 4: Final synthesis from v2 snapshots
         if from_phase <= 4:
