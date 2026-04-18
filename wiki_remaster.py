@@ -1649,6 +1649,16 @@ Phases:
 
         # Phase 1: Build mention index + char batches (full reset)
         if from_phase <= 1:
+            merged_count = db.count_char_batches_merged()
+            if merged_count > 0 and from_phase == 0:
+                logger.error(
+                    "SAFETY GUARD: {} char_batches already MERGED. "
+                    "Running Phase 1 will wipe all progress. "
+                    "Use --from-phase 3 to resume, or --from-phase 1 to force reinit.",
+                    merged_count,
+                )
+                db.close()
+                sys.exit(1)
             phase1_init_batches(db, dry_run)
 
         # Phase 2: Build character markdown + seed artifact stubs

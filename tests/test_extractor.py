@@ -122,9 +122,11 @@ class TestExtractBatch:
 
 class TestNormalize:
     def test_lowercase_strip(self):
-        assert _normalize("  Lâm Phong  ") == "lâm phong"
+        # _normalize strips diacritics (NFD → drop Mn category)
+        assert _normalize("  Lâm Phong  ") == "lam phong"
 
-    def test_nfc(self):
-        # Already NFC, no change expected
-        result = _normalize("Lâm")
-        assert result == "lâm"
+    def test_strips_diacritics(self):
+        # Vietnamese diacritics are removed, đ/Đ mapped to d/D
+        assert _normalize("Lâm") == "lam"
+        assert _normalize("Đỗ") == "do"
+        assert _normalize("Nguyễn") == "nguyen"

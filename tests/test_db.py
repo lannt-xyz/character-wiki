@@ -230,3 +230,40 @@ class TestCharacterLogicalDeleteAndMerge:
         art_snap = db.get_latest_artifact_snapshot("kiem_001")
         assert art_snap is not None
         assert art_snap["owner_id"] == "canon_001"
+
+
+class TestCharBatches:
+    def test_build_and_count(self, db):
+        _add_character(db, "hero_001", "Lâm Phong")
+        db.build_char_batches([{"character_id": "hero_001", "segment_start": 1, "segment_end": 50}])
+        assert db.count_char_batches_total() == 1
+        assert db.count_char_batches_merged() == 0
+
+    def test_set_merged_removes_from_pending(self, db):
+        _add_character(db, "hero_001", "Lâm Phong")
+        db.build_char_batches([{"character_id": "hero_001", "segment_start": 1, "segment_end": 50}])
+        batch_id = db.get_pending_char_batches()[0]["batch_id"]
+        db.set_char_batch_status(batch_id, "MERGED")
+        assert db.count_char_batches_merged() == 1
+        assert db.get_pending_char_batches() == []
+
+    def test_clear_char_batches(self, db):
+        _add_character(db, "hero_001", "Lâm Phong")
+        db.build_char_batches([{"character_id": "hero_001", "segment_start": 1, "segment_end": 50}])
+        db.clear_char_batches()
+        assert db.count_char_batches_total() == 0
+        assert db.count_char_batches_merged() == 0
+
+    def test_multiple_batches_partial_merged(self, db):
+        _add_character(db, "hero_001", "Lâm Phong")
+        _add_character(db, "hero_002", "Vân Lam")
+        db.build_char_batches([
+            {"character_id": "hero_001", "segment_start": 1, "segment_end": 50},
+            {"character_id": "hero_001", "segment_start": 100, "segment_end": 150},
+            {"character_id": "hero_002", "segment_start": 1, "segment_end": 50},
+        ])
+        assert db.count_char_batches_total() == 3
+        pending = db.get_pending_char_batches()
+        db.set_char_batch_status(pending[0]["batch_id"], "MERGED")
+        assert db.count_char_batches_merged() == 1
+        assert len(db.get_pending_char_batches()) == 2
