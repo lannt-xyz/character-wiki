@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     wiki_context_threshold: int = 50
     wiki_max_consecutive_fail: int = 5
     wiki_snapshot_min_change: int = 1
+    wiki_pass1_budget: int = 28000  # balanced excerpt budget for Pass 1 (name scan)
+    wiki_pass2_budget: int = 20000  # balanced excerpt budget for Pass 2 (delta extract)
 
     # Per-character salient-span extraction (wiki_remaster Phase 1 & 3)
     char_segment_size: int = 20

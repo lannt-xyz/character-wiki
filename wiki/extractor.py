@@ -10,6 +10,7 @@ Pass 2 — Delta Extract:
 """
 
 import json
+import re
 import time
 from typing import Optional
 
@@ -150,13 +151,54 @@ def offload_ollama(model: Optional[str] = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Greedy chapter packing
+# ---------------------------------------------------------------------------
+
+def _pack_chapters_within_budget(
+    batch_text: str,
+    chapter_start: int,
+    chapter_end: int,
+    max_chars: int,
+) -> str:
+    """Greedily pack full chapters within the char budget.
+
+    Iterates chapters in order; skips any chapter whose addition would
+    exceed max_chars — included chapters are always complete, never
+    truncated mid-way. Falls back to head-truncation when chapter markers
+    are absent. Token estimate: ~4 chars/token (Vietnamese mixed text).
+    """
+    if not batch_text.strip() or max_chars <= 0:
+        return ""
+
+    markers = list(re.finditer(r"\n--- Chương\s+\d+\s+---\n", batch_text))
+    if not markers:
+        return batch_text[:max_chars]
+
+    included: list[str] = []
+    used = 0
+    for idx, marker in enumerate(markers):
+        block_start = marker.start()
+        block_end = markers[idx + 1].start() if idx + 1 < len(markers) else len(batch_text)
+        chapter_text = batch_text[block_start:block_end]
+        if used + len(chapter_text) > max_chars:
+            continue  # skip — would exceed budget; try next (may be shorter)
+        included.append(chapter_text)
+        used += len(chapter_text)
+
+    return "\n".join(included)
+
+
+# ---------------------------------------------------------------------------
 # Pass 1 — Name Scan
 # ---------------------------------------------------------------------------
 
 def _pass1_name_scan(batch_text: str, chapter_start: int, chapter_end: int) -> list[NameEntry]:
     """Return list of NameEntry from the batch text. Empty list on parse failure."""
+    excerpt = _pack_chapters_within_budget(
+        batch_text, chapter_start, chapter_end, settings.wiki_pass1_budget
+    )
     prompt = _PASS1_USER_TMPL.format(
-        start=chapter_start, end=chapter_end, text=batch_text[:8000]
+        start=chapter_start, end=chapter_end, text=excerpt
     )
     try:
         raw = _ollama_generate(prompt, _PASS1_SYSTEM, settings.wiki_extract_model)
@@ -210,10 +252,13 @@ def _pass2_delta_extract(
 ) -> ExtractionResult:
     """Run Pass 2 and return ExtractionResult. Raises on parse failure."""
     context_str = _build_character_context(character_context_rows)
+    excerpt = _pack_chapters_within_budget(
+        batch_text, chapter_start, chapter_end, settings.wiki_pass2_budget
+    )
     prompt = _PASS2_USER_TMPL.format(
         start=chapter_start,
         end=chapter_end,
-        text=batch_text[:12000],
+        text=excerpt,
         character_context=context_str,
     )
     raw = _ollama_generate(prompt, _PASS2_SYSTEM, settings.wiki_extract_model)

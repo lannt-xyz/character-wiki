@@ -25,6 +25,8 @@ wiki_extract_model: "gemma4-32k:latest"
 wiki_context_threshold: 50
 wiki_max_consecutive_fail: 5
 wiki_snapshot_min_change: 1
+wiki_pass1_budget: 28000     # max chars of balanced batch text sent to Pass 1 (name scan)
+wiki_pass2_budget: 20000     # max chars of balanced batch text sent to Pass 2 (delta extract)
 
 # Per-character salient-span extraction (wiki_remaster Phase 1 & 3)
 char_segment_size: 20       # chapters per char batch

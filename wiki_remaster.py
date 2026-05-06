@@ -43,6 +43,7 @@ from models.schemas import (
 from wiki.extractor import (
     _PASS1_SYSTEM,
     _PASS1_USER_TMPL,
+    _pack_chapters_within_budget,
     _build_character_context,
     _normalize,
     _ollama_generate,
@@ -356,41 +357,6 @@ def _load_batch_text(chapter_start: int, chapter_end: int, db: SQLiteDB) -> str:
         else:
             logger.warning("Missing chapter content in DB | ch={}", ch_num)
     return "\n".join(parts)
-
-
-def _build_balanced_batch_excerpt(
-    batch_text: str,
-    chapter_start: int,
-    chapter_end: int,
-    max_chars: int = 12000,
-) -> str:
-    """Build a chapter-balanced excerpt so all chapters get represented.
-
-    Old behavior sliced from the beginning only, which could include just the first
-    1-2 chapters in long batches. This function allocates text budget per chapter.
-    """
-    if not batch_text.strip() or max_chars <= 0:
-        return ""
-
-    chapter_count = max(1, chapter_end - chapter_start + 1)
-    markers = list(re.finditer(r"\n--- Chương\s+(\d+)\s+---\n", batch_text))
-    if not markers:
-        return batch_text[:max_chars]
-
-    # Keep some room for separators and avoid very tiny per-chapter slices.
-    per_chapter_budget = max(300, max_chars // chapter_count)
-    chunks: list[str] = []
-
-    for idx, marker in enumerate(markers):
-        block_start = marker.start()
-        block_end = markers[idx + 1].start() if idx + 1 < len(markers) else len(batch_text)
-        block = batch_text[block_start:block_end]
-        chunks.append(block[:per_chapter_budget])
-
-    excerpt = "\n".join(chunks)
-    if len(excerpt) > max_chars:
-        excerpt = excerpt[:max_chars]
-    return excerpt
 
 
 def _text_has_phrase(batch_text: str, phrase: Optional[str]) -> bool:
@@ -1109,7 +1075,7 @@ def _remaster_pass2(
 ) -> tuple[ExtractionResult, list[dict]]:
     """Run Pass 2: extract character deltas + artifact updates for this batch."""
     context_str = _build_character_context(candidate_chars)
-    batch_excerpt = _build_balanced_batch_excerpt(
+    batch_excerpt = _pack_chapters_within_budget(
         batch_text=batch_text,
         chapter_start=chapter_start,
         chapter_end=chapter_end,
