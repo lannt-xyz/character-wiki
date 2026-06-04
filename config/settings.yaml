@@ -1,7 +1,7 @@
 # Story source
-story_slug: "mao-son-troc-quy-nhan"
-base_url: "https://truyencv.io/truyen/{story_slug}/chuong-{n}/"
-total_chapters: 3682
+story_slug: "co-giao-thao"
+base_url: "data/remake"
+total_chapters: 5
 
 # API endpoints
 ollama_url: "http://localhost:11434"
@@ -13,6 +13,7 @@ llm_max_retries: 3
 # Paths (relative to project root)
 data_dir: "data"
 logs_dir: "logs"
+chapter_source_dir: "data/remake"
 
 # Crawler
 crawler_rate_limit: 1.0
@@ -20,13 +21,13 @@ crawler_max_retries: 5
 crawler_delay_sec: 1.0
 
 # Wiki extraction
-wiki_batch_size: 10
-wiki_extract_model: "gemma4-32k:latest"
+wiki_batch_size: 3
+wiki_extract_model: "gemma4:e4b-it-q4_K_M"
 wiki_context_threshold: 50
 wiki_max_consecutive_fail: 5
 wiki_snapshot_min_change: 1
-wiki_pass1_budget: 28000     # max chars of balanced batch text sent to Pass 1 (name scan)
-wiki_pass2_budget: 20000     # max chars of balanced batch text sent to Pass 2 (delta extract)
+wiki_pass1_budget: 60000     # max chars of balanced batch text sent to Pass 1 (name scan)
+wiki_pass2_budget: 60000     # max chars of balanced batch text sent to Pass 2 (delta extract)
 
 # Per-character salient-span extraction (wiki_remaster Phase 1 & 3)
 char_segment_size: 20       # chapters per char batch

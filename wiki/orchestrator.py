@@ -161,6 +161,47 @@ def run_pipeline(
                         )
                     continue
 
+                # Auto-extend: ChunkedScraper may return more chapters than the
+                # original batch window (e.g. 1 URL → 23 chunks). Register any
+                # overflow chapters as new batches so they get extracted too.
+                good_chapters = [ch for ch in chapters if ch.status != "ERROR"]
+                actual_max = max((ch.chapter_num for ch in good_chapters), default=chapter_end)
+                if actual_max > chapter_end and not dry_run:
+                    # For chunked overflow, each chunk must be its own batch
+                    # (1 chunk ≈ wiki_pass2_budget chars → 1 LLM call).
+                    # Using wiki_batch_size here would group multiple chunks
+                    # into one batch, causing content to be cut by the budget.
+                    batch_size = 1
+                    next_start = chapter_end + 1
+                    new_batch_ids: set = {b["batch_id"] for b in db.get_all_batches()}
+                    while next_start <= actual_max:
+                        next_end = min(next_start + batch_size - 1, actual_max)
+                        if next_start not in new_batch_ids:
+                            db.upsert_batch(
+                                batch_id=next_start,
+                                chapter_start=next_start,
+                                chapter_end=next_end,
+                                status="CRAWLED",
+                                extraction_version=extraction_version,
+                            )
+                            # Add to the active pending list so this run processes them
+                            pending.append({
+                                "batch_id": next_start,
+                                "chapter_start": next_start,
+                                "chapter_end": next_end,
+                                "status": "CRAWLED",
+                                "extraction_version": extraction_version,
+                            })
+                            logger.info(
+                                "Auto-created batch ch {}-{} (chunked overflow)",
+                                next_start, next_end,
+                            )
+                            new_batch_ids.add(next_start)
+                        next_start = next_end + 1
+                    # Refresh total_batches so progress % is correct
+                    all_batches = db.get_all_batches()
+                    total_batches = len(all_batches)
+
                 if not dry_run:
                     db.upsert_batch(
                         batch_id=batch_id,

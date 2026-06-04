@@ -75,6 +75,8 @@ class Character(BaseModel):
     relations: list[dict] = Field(default_factory=list)
     # Fixed physical anchor (scars, birthmarks, build) — sent in every Pass 2 context
     visual_anchor: Optional[str] = None
+    gender: Optional[str] = None
+    faction: Optional[str] = None
 
 
 class ExtractionResult(BaseModel):

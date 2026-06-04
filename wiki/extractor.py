@@ -12,6 +12,8 @@ Pass 2 — Delta Extract:
 import json
 import re
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -20,6 +22,34 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from config.settings import settings
 from models.schemas import CharacterPatch, ExtractionResult, NameEntry
+
+_DATA_DIR = Path(settings.data_dir)
+_LLM_REQ_DIR = _DATA_DIR / "llm_request"
+_LLM_RESP_DIR = _DATA_DIR / "llm_response"
+
+
+def _trace_request(tag: str, chapter_start: int, chapter_end: int, system: str, prompt: str) -> None:
+    """Write LLM prompt to data/llm_request/<tag>_ch{start}-{end}_<ts>.txt."""
+    try:
+        _LLM_REQ_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%H%M%S")
+        fname = f"{tag}_ch{chapter_start}-{chapter_end}_{ts}.txt"
+        (_LLM_REQ_DIR / fname).write_text(
+            f"[SYSTEM]\n{system}\n\n[USER]\n{prompt}", encoding="utf-8"
+        )
+    except Exception as exc:
+        logger.debug("trace_request write failed | {}", exc)
+
+
+def _trace_response(tag: str, chapter_start: int, chapter_end: int, raw: str) -> None:
+    """Write LLM raw response to data/llm_response/<tag>_ch{start}-{end}_<ts>.txt."""
+    try:
+        _LLM_RESP_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%H%M%S")
+        fname = f"{tag}_ch{chapter_start}-{chapter_end}_{ts}.txt"
+        (_LLM_RESP_DIR / fname).write_text(raw, encoding="utf-8")
+    except Exception as exc:
+        logger.debug("trace_response write failed | {}", exc)
 
 
 class ExtractionFatalError(Exception):
@@ -31,8 +61,10 @@ class ExtractionFatalError(Exception):
 # ---------------------------------------------------------------------------
 
 _PASS1_SYSTEM = (
-    "Bạn là trợ lý phân tích truyện. Nhiệm vụ: liệt kê tên nhân vật xuất hiện trong đoạn text "
-    "dưới đây kèm biệt danh/cách gọi khác. Chỉ trả JSON array, không giải thích thêm."
+    "Bạn là trợ lý phân tích truyện. Nhiệm vụ: liệt kê TẤT CẢ tên nhân vật xuất hiện trong "
+    "đoạn text dưới đây — bao gồm cả nhân vật phụ, người chỉ nhắc thoáng qua, nhân vật được "
+    "gọi bằng danh hiệu/vai vế/biệt danh/chức danh (vd: 'chị Thảo', 'thầy giáo', 'người phụ nữ'). "
+    "Kèm biệt danh/cách gọi khác. Chỉ trả JSON array, không giải thích thêm."
 )
 
 _PASS1_USER_TMPL = """\
@@ -44,8 +76,11 @@ Trả về JSON array với cấu trúc: [{{"name": "...", "aliases": ["...", ".
 Chỉ tên nhân vật cụ thể, không tên địa danh hay tên sự vật."""
 
 _PASS2_SYSTEM = (
-    "Bạn là trợ lý xây dựng wiki nhân vật. Nhiệm vụ: trích xuất sự thay đổi trạng thái nhân vật "
-    "từ đoạn truyện mới. Chỉ trả JSON theo schema quy định, không giải thích, không markdown."
+    "Bạn là trợ lý xây dựng wiki nhân vật. Nhiệm vụ: trích xuất đầy đủ thông tin nhân vật "
+    "từ đoạn truyện — ưu tiên ngoại hình, trang phục, tính cách, trạng thái thể chất. "
+    "Với nhân vật mới: điền visual_anchor từ MỌI mô tả ngoại hình có trong text, "
+    "không bỏ sót dù là chi tiết nhỏ (dáng người, tóc, mắt, giọng nói, cử chỉ đặc trưng). "
+    "Chỉ trả JSON theo schema quy định, không giải thích, không markdown."
 )
 
 _PASS2_USER_TMPL = """\
@@ -66,18 +101,20 @@ Trả về JSON với cấu trúc:
         "name": "<tên đầy đủ>",
         "name_normalized": "<lowercase, no diacritics removed>",
         "aliases": [],
-        "traits": ["<tính cách>"],
+        "gender": "<nam/nữ/không rõ>",
+        "faction": "<phe/tổ chức/nghề nghiệp hoặc null>",
+        "traits": ["<tính cách và cử chỉ đặc trưng, vd: bình tĩnh, dịu dàng, hay cười khẽ>"],
         "relations": [{{"related_name": "...", "description": "...", "chapter_start": {start}}}],
-        "visual_anchor": "<đặc điểm ngoại hình cố định: sẹo, dị tật, đặc trưng>  hoặc null"
+        "visual_anchor": "<mô tả ngoại hình cố định: vóc dáng, mái tóc, màu mắt, làn da, giọng nói, cử chỉ đặc trưng. Tổng hợp MỌI chi tiết ngoại hình cố định từ text, không chỉ sẹo/dị tật. null nếu không có thông tin>"
       }},
       "snapshot": {{
         "chapter_start": {start},
         "is_active": true,
-        "level": "<cảnh giới hoặc null>",
-        "outfit": "<trang phục hoặc null>",
+        "level": "<cảnh giới hoặc null (null nếu truyện hiện đại/không có tu tiên)>",
+        "outfit": "<mô tả đầy đủ trang phục: kiểu, màu, chi tiết nổi bật. null nếu không đề cập>",
         "weapon": "<vũ khí hoặc null>",
-        "vfx_vibes": "<mô tả hiệu ứng hình ảnh hoặc null>",
-        "physical_description": "<trạng thái thể chất tạm thời hoặc null>",
+        "vfx_vibes": "<mô tả hiệu ứng hình ảnh/không khí hoặc null>",
+        "physical_description": "<trạng thái thể chất tạm thời (vết thương, mệt mỏi, cảm xúc trên gương mặt) hoặc null>",
         "visual_importance": <1-10>
       }}
     }}
@@ -101,7 +138,8 @@ Quy tắc quan trọng:
 - Persistent fields (level, outfit, weapon, vfx_vibes): trả null nếu không thay đổi
 - Transient field (physical_description): trả null nếu trạng thái đó kết thúc hoặc không nhắc
 - Không nhắc đến nhân vật không xuất hiện trong đoạn này
-- updated_characters chỉ chứa nhân vật CŨ (đã có trong context), không chứa nhân vật mới"""
+- updated_characters chỉ chứa nhân vật CŨ (đã có trong context), không chứa nhân vật mới
+- Nhân vật kể chuyện theo ngôi thứ nhất (xưng 'tôi', 'mình') PHẢI đưa vào new_characters nếu chưa có trong context, dù chỉ xuất hiện qua đại từ"""
 
 
 # ---------------------------------------------------------------------------
@@ -162,10 +200,10 @@ def _pack_chapters_within_budget(
 ) -> str:
     """Greedily pack full chapters within the char budget.
 
-    Iterates chapters in order; skips any chapter whose addition would
-    exceed max_chars — included chapters are always complete, never
-    truncated mid-way. Falls back to head-truncation when chapter markers
-    are absent. Token estimate: ~4 chars/token (Vietnamese mixed text).
+    Iterates chapters in order and stops at the first chapter that would
+    exceed max_chars — included chapters are always complete and contiguous,
+    never truncated or reordered. Falls back to head-truncation when chapter
+    markers are absent. Token estimate: ~4 chars/token (Vietnamese mixed text).
     """
     if not batch_text.strip() or max_chars <= 0:
         return ""
@@ -181,7 +219,11 @@ def _pack_chapters_within_budget(
         block_end = markers[idx + 1].start() if idx + 1 < len(markers) else len(batch_text)
         chapter_text = batch_text[block_start:block_end]
         if used + len(chapter_text) > max_chars:
-            continue  # skip — would exceed budget; try next (may be shorter)
+            if not included:
+                # Always include at least the first chapter even if it exceeds
+                # the budget (better to send slightly over than to send nothing).
+                included.append(chapter_text)
+            break  # stop — chapters must be contiguous, no skipping
         included.append(chapter_text)
         used += len(chapter_text)
 
@@ -200,8 +242,10 @@ def _pass1_name_scan(batch_text: str, chapter_start: int, chapter_end: int) -> l
     prompt = _PASS1_USER_TMPL.format(
         start=chapter_start, end=chapter_end, text=excerpt
     )
+    _trace_request("pass1", chapter_start, chapter_end, _PASS1_SYSTEM, prompt)
     try:
         raw = _ollama_generate(prompt, _PASS1_SYSTEM, settings.wiki_extract_model)
+        _trace_response("pass1", chapter_start, chapter_end, raw)
         data = json.loads(raw)
         # Support both wrapped {"characters": [...]} and bare [...]
         if isinstance(data, dict):
@@ -234,11 +278,42 @@ def _build_character_context(characters: list[dict]) -> str:
         else:
             aliases = aliases_raw or []
 
+        traits_raw = char.get("traits_json", "[]")
+        if isinstance(traits_raw, str):
+            try:
+                traits = json.loads(traits_raw)
+            except Exception:
+                traits = []
+        else:
+            traits = traits_raw or []
+
         lines.append(f"### {char['name']} [{char['character_id']}]")
+        if char.get("gender"):
+            lines.append(f"- Giới tính: {char['gender']}")
+        if char.get("faction"):
+            lines.append(f"- Phe/Nghề: {char['faction']}")
         if aliases:
             lines.append(f"- Aliases: {', '.join(aliases)}")
         if char.get("visual_anchor"):
-            lines.append(f"- Visual anchor: {char['visual_anchor']}")
+            lines.append(f"- Ngoại hình: {char['visual_anchor']}")
+        if traits:
+            lines.append(f"- Traits: {', '.join(traits)}")
+        if char.get("personality"):
+            lines.append(f"- Tính cách: {char['personality']}")
+
+        snap = char.get("_latest_snapshot") or {}
+        if snap:
+            if snap.get("level"):
+                lines.append(f"- Cảnh giới: {snap['level']}")
+            if snap.get("outfit"):
+                lines.append(f"- Trang phục: {snap['outfit']}")
+            if snap.get("weapon"):
+                lines.append(f"- Vũ khí: {snap['weapon']}")
+            if snap.get("vfx_vibes"):
+                lines.append(f"- VFX: {snap['vfx_vibes']}")
+            if snap.get("physical_description"):
+                lines.append(f"- Trạng thái: {snap['physical_description']}")
+
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -261,7 +336,9 @@ def _pass2_delta_extract(
         text=excerpt,
         character_context=context_str,
     )
+    _trace_request("pass2", chapter_start, chapter_end, _PASS2_SYSTEM, prompt)
     raw = _ollama_generate(prompt, _PASS2_SYSTEM, settings.wiki_extract_model)
+    _trace_response("pass2", chapter_start, chapter_end, raw)
     data = json.loads(raw)
 
     new_chars = data.get("new_characters", [])

@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     # Paths
     data_dir: str = "data"
     logs_dir: str = "logs"
+    chapter_source_dir: str | None = None
 
     # Crawler
     crawler_rate_limit: float = 1.0

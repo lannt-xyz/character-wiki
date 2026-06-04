@@ -85,6 +85,8 @@ def merge_extraction_result(
         aliases = char_data.get("aliases") or []
         traits = char_data.get("traits") or []
         visual_anchor = char_data.get("visual_anchor")
+        gender = char_data.get("gender")
+        faction = char_data.get("faction")
         relations = char_data.get("relations") or []
 
         # Reuse existing character_id if name_normalized already exists
@@ -109,6 +111,8 @@ def merge_extraction_result(
             aliases=aliases,
             traits=traits,
             visual_anchor=visual_anchor,
+            gender=gender,
+            faction=faction,
         )
 
         # add initial snapshot
@@ -143,9 +147,25 @@ def merge_extraction_result(
 
         char_row = db.get_character_by_id(character_id)
         if not char_row:
-            logger.warning("Patch for unknown character | id={}", character_id)
-            n_skipped += 1
-            continue
+            # LLM sometimes puts first-appearance characters in updated_characters.
+            # Treat as new: create a minimal identity row so the snapshot is not lost.
+            logger.info(
+                "Unknown character in updated_characters — auto-creating | id={}",
+                character_id,
+            )
+            name = patch.character_id.replace("_", " ").title()
+            name_norm = normalize_name(name)
+            db.upsert_character(
+                character_id=character_id,
+                name=name,
+                name_normalized=name_norm,
+                aliases=patch.aliases or [],
+                traits=[],
+                visual_anchor=None,
+                gender=None,
+                faction=None,
+            )
+            char_row = db.get_character_by_id(character_id)
 
         base = db.get_latest_snapshot(character_id)
 

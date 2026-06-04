@@ -255,6 +255,8 @@ class SQLiteDB:
         aliases: list[str],
         traits: list[str],
         visual_anchor: Optional[str],
+        gender: Optional[str] = None,
+        faction: Optional[str] = None,
     ) -> None:
         """Insert or update identity fields only. Never touches temporal data.
         
@@ -283,14 +285,16 @@ class SQLiteDB:
         self._conn.execute(
             """
             INSERT INTO wiki_characters
-                (character_id, name, name_normalized, aliases_json, traits_json, visual_anchor, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (character_id, name, name_normalized, aliases_json, traits_json, visual_anchor, gender, faction, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(character_id) DO UPDATE SET
                 name=excluded.name,
                 name_normalized=excluded.name_normalized,
                 aliases_json=excluded.aliases_json,
                 traits_json=excluded.traits_json,
                 visual_anchor=excluded.visual_anchor,
+                gender=COALESCE(excluded.gender, gender),
+                faction=COALESCE(excluded.faction, faction),
                 is_deleted=0,
                 merged_into_character_id=NULL,
                 deleted_at=NULL,
@@ -303,6 +307,8 @@ class SQLiteDB:
                 json.dumps(aliases, ensure_ascii=False),
                 json.dumps(traits, ensure_ascii=False),
                 visual_anchor,
+                gender,
+                faction,
                 now,
                 now,
             ),
