@@ -35,6 +35,7 @@ class CharacterSnapshot(BaseModel):
 
     # Persistent fields — inherited from latest snapshot when LLM returns None
     level: Optional[str] = None
+    age: Optional[str] = None
     outfit: Optional[str] = None
     weapon: Optional[str] = None
     vfx_vibes: Optional[str] = None
@@ -55,6 +56,7 @@ class CharacterPatch(BaseModel):
 
     character_id: str
     level: Optional[str] = None
+    age: Optional[str] = None
     outfit: Optional[str] = None
     weapon: Optional[str] = None
     vfx_vibes: Optional[str] = None
@@ -159,6 +161,7 @@ class CharBatchSnapshot(BaseModel):
     chapter_start: int
     is_active: bool = True
     level: Optional[str] = None
+    age: Optional[str] = None
     outfit: Optional[str] = None
     weapon: Optional[str] = None
     vfx_vibes: Optional[str] = None

@@ -105,12 +105,14 @@ Trả về JSON với cấu trúc:
         "faction": "<phe/tổ chức/nghề nghiệp hoặc null>",
         "traits": ["<tính cách và cử chỉ đặc trưng, vd: bình tĩnh, dịu dàng, hay cười khẽ>"],
         "relations": [{{"related_name": "...", "description": "...", "chapter_start": {start}}}],
-        "visual_anchor": "<mô tả ngoại hình cố định: vóc dáng, mái tóc, màu mắt, làn da, giọng nói, cử chỉ đặc trưng. Tổng hợp MỌI chi tiết ngoại hình cố định từ text, không chỉ sẹo/dị tật. null nếu không có thông tin>"
+        "visual_anchor": "<mô tả ngoại hình cố định: vóc dáng, mái tóc, màu mắt, làn da, giọng nói, cử chỉ đặc trưng. Tổng hợp MỌI chi tiết ngoại hình cố định từ text, không chỉ sẹo/dị tật. null nếu không có thông tin>",
+        "age": "<tuổi hoặc mô tả độ tuổi (vd: 20, khoảng 15, trẻ em) hoặc null>"
       }},
       "snapshot": {{
         "chapter_start": {start},
         "is_active": true,
         "level": "<cảnh giới hoặc null (null nếu truyện hiện đại/không có tu tiên)>",
+        "age": "<tuổi hoặc mô tả độ tuổi (vd: 20, khoảng 15, trẻ em) hoặc null>",
         "outfit": "<mô tả đầy đủ trang phục: kiểu, màu, chi tiết nổi bật. null nếu không đề cập>",
         "weapon": "<vũ khí hoặc null>",
         "vfx_vibes": "<mô tả hiệu ứng hình ảnh/không khí hoặc null>",
@@ -123,6 +125,7 @@ Trả về JSON với cấu trúc:
     {{
       "character_id": "<id nhân vật cũ>",
       "level": "<cảnh giới mới hoặc null nếu không đổi>",
+      "age": "<tuổi mới hoặc null nếu không đổi>",
       "outfit": "<trang phục mới hoặc null>",
       "weapon": "<vũ khí mới hoặc null>",
       "vfx_vibes": "<hiệu ứng mới hoặc null>",
@@ -292,6 +295,8 @@ def _build_character_context(characters: list[dict]) -> str:
             lines.append(f"- Giới tính: {char['gender']}")
         if char.get("faction"):
             lines.append(f"- Phe/Nghề: {char['faction']}")
+        if char.get("age"):
+            lines.append(f"- Tuổi: {char['age']}")
         if aliases:
             lines.append(f"- Aliases: {', '.join(aliases)}")
         if char.get("visual_anchor"):
@@ -305,6 +310,8 @@ def _build_character_context(characters: list[dict]) -> str:
         if snap:
             if snap.get("level"):
                 lines.append(f"- Cảnh giới: {snap['level']}")
+            if snap.get("age"):
+                lines.append(f"- Tuổi: {snap['age']}")
             if snap.get("outfit"):
                 lines.append(f"- Trang phục: {snap['outfit']}")
             if snap.get("weapon"):
