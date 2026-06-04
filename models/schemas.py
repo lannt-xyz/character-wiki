@@ -79,6 +79,7 @@ class Character(BaseModel):
     visual_anchor: Optional[str] = None
     gender: Optional[str] = None
     faction: Optional[str] = None
+    personality: Optional[str] = None
 
 
 class ExtractionResult(BaseModel):

@@ -106,7 +106,8 @@ Trả về JSON với cấu trúc:
         "traits": ["<tính cách và cử chỉ đặc trưng, vd: bình tĩnh, dịu dàng, hay cười khẽ>"],
         "relations": [{{"related_name": "...", "description": "...", "chapter_start": {start}}}],
         "visual_anchor": "<mô tả ngoại hình cố định: vóc dáng, mái tóc, màu mắt, làn da, giọng nói, cử chỉ đặc trưng. Tổng hợp MỌI chi tiết ngoại hình cố định từ text, không chỉ sẹo/dị tật. null nếu không có thông tin>",
-        "age": "<tuổi hoặc mô tả độ tuổi (vd: 20, khoảng 15, trẻ em) hoặc null>"
+        "age": "<tuổi hoặc mô tả độ tuổi (vd: 20, khoảng 15, trẻ em) hoặc null>",
+        "personality": "<tóm tắt tính cách đặc trưng của nhân vật dựa trên hành động/lời nói trong text hoặc null>"
       }},
       "snapshot": {{
         "chapter_start": {start},
@@ -126,6 +127,7 @@ Trả về JSON với cấu trúc:
       "character_id": "<id nhân vật cũ>",
       "level": "<cảnh giới mới hoặc null nếu không đổi>",
       "age": "<tuổi mới hoặc null nếu không đổi>",
+      "personality": "<tính cách mới/thay đổi hoặc null>",
       "outfit": "<trang phục mới hoặc null>",
       "weapon": "<vũ khí mới hoặc null>",
       "vfx_vibes": "<hiệu ứng mới hoặc null>",
@@ -297,6 +299,8 @@ def _build_character_context(characters: list[dict]) -> str:
             lines.append(f"- Phe/Nghề: {char['faction']}")
         if char.get("age"):
             lines.append(f"- Tuổi: {char['age']}")
+        if char.get("personality"):
+            lines.append(f"- Tính cách: {char['personality']}")
         if aliases:
             lines.append(f"- Aliases: {', '.join(aliases)}")
         if char.get("visual_anchor"):
