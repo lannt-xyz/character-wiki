@@ -49,3 +49,5 @@ htmlcov/
 
 # ComfyUI output (if symlinked)
 ComfyUI/output/
+# Added by code-review-graph
+.code-review-graph/
