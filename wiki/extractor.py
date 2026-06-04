@@ -60,12 +60,11 @@ class ExtractionFatalError(Exception):
 # Prompts
 # ---------------------------------------------------------------------------
 
-_PASS1_SYSTEM = (
-    "Bạn là trợ lý phân tích truyện. Nhiệm vụ: liệt kê TẤT CẢ tên nhân vật xuất hiện trong "
-    "đoạn text dưới đây — bao gồm cả nhân vật phụ, người chỉ nhắc thoáng qua, nhân vật được "
-    "gọi bằng danh hiệu/vai vế/biệt danh/chức danh (vd: 'chị Thảo', 'thầy giáo', 'người phụ nữ'). "
-    "Kèm biệt danh/cách gọi khác. Chỉ trả JSON array, không giải thích thêm."
-)
+_PASS1_SYSTEM = """\
+Bạn là trợ lý phân tích truyện.
+Nhiệm vụ: liệt kê TẤT CẢ tên nhân vật xuất hiện trong  đoạn text dưới đây — bao gồm cả nhân vật phụ, người chỉ nhắc thoáng qua, nhân vật được gọi bằng danh hiệu/vai vế/biệt danh/chức danh (vd: 'chị Thảo', 'thầy giáo', 'người phụ nữ'). Kèm biệt danh/cách gọi khác.
+Chỉ trả JSON array, không giải thích thêm.
+"""
 
 _PASS1_USER_TMPL = """\
 Đoạn truyện (Chương {start}-{end}):
@@ -73,24 +72,27 @@ _PASS1_USER_TMPL = """\
 {text}
 ---
 Trả về JSON array với cấu trúc: [{{"name": "...", "aliases": ["...", "..."]}}]
-Chỉ tên nhân vật cụ thể, không tên địa danh hay tên sự vật."""
+Chỉ tên nhân vật cụ thể, không tên địa danh hay tên sự vật.
+"""
 
-_PASS2_SYSTEM = (
-    "Bạn là trợ lý xây dựng wiki nhân vật. Nhiệm vụ: trích xuất đầy đủ thông tin nhân vật "
-    "từ đoạn truyện — ưu tiên ngoại hình, trang phục, tính cách, trạng thái thể chất. "
-    "Với nhân vật mới: điền visual_anchor từ MỌI mô tả ngoại hình có trong text, "
-    "không bỏ sót dù là chi tiết nhỏ (dáng người, tóc, mắt, giọng nói, cử chỉ đặc trưng). "
-    "Chỉ trả JSON theo schema quy định, không giải thích, không markdown."
-)
+_PASS2_SYSTEM = """\
+Bạn là trợ lý xây dựng wiki nhân vật trong các bộ truyện chữ.
+Nhiệm vụ: trích xuất đầy đủ thông tin nhân vật từ đoạn truyện — ưu tiên ngoại hình, độ tuổi, trang phục, tính cách, trạng thái thể chất.
+Với nhân vật mới: điền visual_anchor từ MỌI mô tả ngoại hình có trong text, không bỏ sót dù là chi tiết nhỏ (tên, tuổi, dáng người, tóc, mắt, giọng nói, cử chỉ đặc trưng).
+QUY TẮC QUAN TRỌNG:
+- LUÔN LUÔN: review lại kết quả trước khi trả về, đảm bảo không bỏ sót nhân vật nào xuất hiện trong đoạn truyện, hoặc cấu trúc JSON không hợp lệ. Nếu không chắc chắn, hãy bổ sung thêm thông tin để đảm bảo đầy đủ.
+- Persistent fields (level, outfit, weapon, vfx_vibes): trả null nếu không thay đổi
+- Transient field (physical_description): trả null nếu trạng thái đó kết thúc hoặc không nhắc
+- Không nhắc đến nhân vật không xuất hiện trong đoạn này
+- updated_characters chỉ chứa nhân vật CŨ (đã có trong context), không chứa nhân vật mới
+- Nhân vật kể chuyện theo ngôi thứ nhất (xưng 'tôi', 'mình') PHẢI đưa vào new_characters nếu chưa có trong context, dù chỉ xuất hiện qua đại từ
+- CHỈ tạo nhân vật khi có: tên riêng hoặc một danh xưng cố định được lặp lại nhiều lần
+- KHÔNG tạo placeholder
+- KHÔNG tạo proxy entity
+- KHÔNG tạo nhân vật suy diễn
+- Nếu không đủ thông tin thì bỏ qua
 
-_PASS2_USER_TMPL = """\
-Đoạn truyện mới (Chương {start}-{end}):
----
-{text}
----
-
-Danh sách nhân vật liên quan (context):
-{character_context}
+Chỉ trả JSON theo schema quy định, không giải thích, không markdown.
 
 Trả về JSON với cấu trúc:
 {{
@@ -138,13 +140,18 @@ Trả về JSON với cấu trúc:
     }}
   ]
 }}
+"""
 
-Quy tắc quan trọng:
-- Persistent fields (level, outfit, weapon, vfx_vibes): trả null nếu không thay đổi
-- Transient field (physical_description): trả null nếu trạng thái đó kết thúc hoặc không nhắc
-- Không nhắc đến nhân vật không xuất hiện trong đoạn này
-- updated_characters chỉ chứa nhân vật CŨ (đã có trong context), không chứa nhân vật mới
-- Nhân vật kể chuyện theo ngôi thứ nhất (xưng 'tôi', 'mình') PHẢI đưa vào new_characters nếu chưa có trong context, dù chỉ xuất hiện qua đại từ"""
+_PASS2_USER_TMPL = """\
+Đoạn truyện mới (Chương {start}-{end}):
+---
+{text}
+---
+
+Danh sách nhân vật liên quan (context):
+{character_context}
+"""
+
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +199,25 @@ def offload_ollama(model: Optional[str] = None) -> None:
     except Exception as exc:
         logger.warning("Could not offload Ollama | model={} error={}", target, exc)
 
+def _clean_text(text: str) -> str:
+    """Remove noise, excessive whitespace, and redundant empty lines."""
+    if not text:
+        return ""
+
+    # 1. Split into lines and trim each line
+    lines = [line.strip() for line in text.splitlines()]
+    
+    # 2. Remove lines that are completely empty or just contain noise characters
+    # (Giữ lại các dòng có nội dung thực sự)
+    cleaned_lines = []
+    for line in lines:
+        if line and line != "":
+            cleaned_lines.append(line)
+
+    # 3. Join back and remove excessive empty lines at start/end
+    result = "\n".join(cleaned_lines).strip()
+
+    return result
 
 # ---------------------------------------------------------------------------
 # Greedy chapter packing
@@ -232,7 +258,8 @@ def _pack_chapters_within_budget(
         included.append(chapter_text)
         used += len(chapter_text)
 
-    return "\n".join(included)
+    packed_text = "\n".join(included)
+    return _clean_text(packed_text)
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +473,6 @@ def _normalize(name: str) -> str:
     import unicodedata
     import re
 
-    name = name.replace("đ", "d").replace("Đ", "D")
     name = unicodedata.normalize("NFD", name)
     name = "".join(c for c in name if unicodedata.category(c) != "Mn")
     name = name.lower().strip()

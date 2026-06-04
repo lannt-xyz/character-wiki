@@ -173,6 +173,7 @@ class SQLiteDB:
             ("is_deleted", "INTEGER NOT NULL DEFAULT 0"),
             ("merged_into_character_id", "TEXT"),
             ("deleted_at", "TEXT"),
+            ("age", "TEXT")
         ]:
             if col_name not in existing_chars:
                 self._conn.execute(
@@ -257,6 +258,8 @@ class SQLiteDB:
         visual_anchor: Optional[str],
         gender: Optional[str] = None,
         faction: Optional[str] = None,
+        age: Optional[str] = None,
+        personality: Optional[str] = None,
     ) -> None:
         """Insert or update identity fields only. Never touches temporal data.
         
@@ -285,8 +288,8 @@ class SQLiteDB:
         self._conn.execute(
             """
             INSERT INTO wiki_characters
-                (character_id, name, name_normalized, aliases_json, traits_json, visual_anchor, gender, faction, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (character_id, name, name_normalized, aliases_json, traits_json, visual_anchor, gender, faction, created_at, updated_at, age, personality)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(character_id) DO UPDATE SET
                 name=excluded.name,
                 name_normalized=excluded.name_normalized,
@@ -298,7 +301,9 @@ class SQLiteDB:
                 is_deleted=0,
                 merged_into_character_id=NULL,
                 deleted_at=NULL,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                age=COALESCE(excluded.age, age),
+                personality=COALESCE(excluded.personality, personality)
             """,
             (
                 character_id,
@@ -311,6 +316,8 @@ class SQLiteDB:
                 faction,
                 now,
                 now,
+                age,
+                personality,
             ),
         )
         self._conn.commit()
@@ -1181,7 +1188,7 @@ def _dt(dt: datetime) -> str:
 def _normalize_lookup_key(text: str) -> str:
     if not text:
         return ""
-    text = text.replace("đ", "d").replace("Đ", "D")
+
     text = unicodedata.normalize("NFD", text)
     text = "".join(c for c in text if unicodedata.category(c) != "Mn")
     text = text.lower().strip()
