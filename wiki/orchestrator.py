@@ -281,12 +281,12 @@ def run_pipeline(
                     len(extraction_result.updated_characters),
                 )
 
-        except ExtractionFatalError as exc:
-            logger.error("FATAL: {} | Stopping pipeline.", exc)
+        except ExtractionFatalError:
+            logger.exception("FATAL: {} | Stopping pipeline.")
             raise
 
-        except Exception as exc:
-            logger.error("Unexpected error | batch={} error={}", batch_id, exc)
+        except Exception:
+            logger.exception("Unexpected error | batch={}", batch_id)
             raise
 
         elapsed = time.monotonic() - batch_start_time

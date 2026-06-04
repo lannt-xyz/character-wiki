@@ -88,6 +88,8 @@ def merge_extraction_result(
         gender = char_data.get("gender")
         faction = char_data.get("faction")
         relations = char_data.get("relations") or []
+        age = char_data.get("age")
+        personality = char_data.get("personality")
 
         # Reuse existing character_id if name_normalized already exists
         # (LLM may return different id variants for the same name)
@@ -113,6 +115,8 @@ def merge_extraction_result(
             visual_anchor=visual_anchor,
             gender=gender,
             faction=faction,
+            age=age,
+            personality=personality,
         )
 
         # add initial snapshot
@@ -164,6 +168,8 @@ def merge_extraction_result(
                 visual_anchor=None,
                 gender=None,
                 faction=None,
+                age=None,
+                personality=None,
             )
             char_row = db.get_character_by_id(character_id)
 
